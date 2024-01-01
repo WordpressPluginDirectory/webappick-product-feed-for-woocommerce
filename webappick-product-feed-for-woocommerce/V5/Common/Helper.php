@@ -396,4 +396,32 @@ class Helper {
 		return $property->getValue($obj);
 	}
 
+	/**
+	 * Get Formatted URL
+	 *
+	 * @param string $url
+	 *
+	 * @return string
+	 */
+	public static function woo_feed_get_formatted_url( $url = '' ) {
+		if ( ! empty( $url ) ) {
+			if ( substr( trim( $url ), 0, 4 ) === 'http' || substr(
+					trim( $url ),
+					0,
+					3
+				) === 'ftp' || substr( trim( $url ), 0, 4 ) === 'sftp' ) {
+				$url = str_replace( ' ' , '%20', $url );
+				return rtrim( $url, '/' );
+			} else {
+				$base = get_site_url();
+				$url = str_replace( ' ' , '%20', $url );
+				$url  = $base . $url;
+
+				return rtrim( $url, '/' );
+			}
+		}
+
+		return '';
+	}
+
 }

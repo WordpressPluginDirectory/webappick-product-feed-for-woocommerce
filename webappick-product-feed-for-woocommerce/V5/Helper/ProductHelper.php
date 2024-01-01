@@ -2,6 +2,7 @@
 
 namespace CTXFeed\V5\Helper;
 
+use CTXFeed\V5\Common\Helper;
 use CTXFeed\V5\Product\AttributeValueByType;
 use CTXFeed\V5\Query\QueryFactory;
 use CTXFeed\V5\Utility\Config;
@@ -172,7 +173,7 @@ class ProductHelper {
 		if ( $attachmentIds && is_array( $attachmentIds ) ) {
 			$mKey = 1;
 			foreach ( $attachmentIds as $attachmentId ) {
-				$imgUrls[ $mKey ] = woo_feed_get_formatted_url( wp_get_attachment_url( $attachmentId ) );
+				$imgUrls[ $mKey ] = Helper::woo_feed_get_formatted_url( wp_get_attachment_url( $attachmentId ) );
 				$mKey ++;
 			}
 		}

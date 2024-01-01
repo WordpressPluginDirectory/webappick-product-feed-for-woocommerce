@@ -19,6 +19,7 @@ use WC_Product_Variation;
 use WPSEO_Meta;
 use WPSEO_Option_Titles;
 use WPSEO_Primary_Term;
+use CTXFeed\V5\Common\Helper as CTX_Helper;
 
 class ProductInfo {
 	/**
@@ -491,14 +492,14 @@ class ProductInfo {
 			// Variation product type
 			if ( has_post_thumbnail( $this->product->get_id() ) ) {
 				$getImage = wp_get_attachment_image_src( get_post_thumbnail_id( $this->product->get_id() ), 'single-post-thumbnail' );
-				$image    = woo_feed_get_formatted_url( $getImage[0] );
+				$image    = CTX_Helper::woo_feed_get_formatted_url( $getImage[0] );
 			} elseif ( has_post_thumbnail( $this->product->get_parent_id() ) ) {
 				$getImage = wp_get_attachment_image_src( get_post_thumbnail_id( $this->product->get_parent_id() ), 'single-post-thumbnail' );
-				$image    = woo_feed_get_formatted_url( $getImage[0] );
+				$image    = CTX_Helper::woo_feed_get_formatted_url( $getImage[0] );
 			}
 		} elseif ( has_post_thumbnail( $this->product->get_id() ) ) { // All product type except variation
 			$getImage = wp_get_attachment_image_src( get_post_thumbnail_id( $this->product->get_id() ), 'single-post-thumbnail' );
-			$image    = isset( $getImage[0] ) ? woo_feed_get_formatted_url( $getImage[0] ) : '';
+			$image    = isset( $getImage[0] ) ? CTX_Helper::woo_feed_get_formatted_url( $getImage[0] ) : '';
 		}
 
 		return apply_filters( 'woo_feed_filter_product_image', $image, $this->product, $this->config );
@@ -516,7 +517,7 @@ class ProductInfo {
 		}
 
 		$getImage = wp_get_attachment_image_src( get_post_thumbnail_id( $id ), 'single-post-thumbnail' );
-		$image    = isset( $getImage[0] ) ? woo_feed_get_formatted_url( $getImage[0] ) : '';
+		$image    = isset( $getImage[0] ) ? CTX_Helper::woo_feed_get_formatted_url( $getImage[0] ) : '';
 
 		return apply_filters( 'woo_feed_filter_product_feature_image', $image, $this->product, $this->config );
 	}
