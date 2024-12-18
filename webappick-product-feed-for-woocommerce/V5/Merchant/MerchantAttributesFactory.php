@@ -203,6 +203,7 @@ class MerchantAttributesFactory {
 						'min_energy_efficiency_class' => 'Min Energy Efficiency Class[energy_efficiency_class]',
 						'max_energy_efficiency_class' => 'Max Energy Efficiency Class[energy_efficiency_class]',
 						'certification'            	  => 'Certification [certification_code]',
+						'certified_pre-owned'         => 'Certified pre-owned [certified_pre-owned]',
 					),
 				),
 				13 => array(
@@ -1181,6 +1182,8 @@ class MerchantAttributesFactory {
 						'max_energy_efficiency_class' => 'Max Energy Efficiency Class[max_energy_efficiency_class]',
 						'seller_name'                 => 'Seller Name[seller_name]',
 						'ads_redirect'                => 'Ads Redirect[ads_redirect]',
+						'excluded_destination'        => 'Excluded Destination[excluded_destination]',
+						'included_destination'        => 'Included Destination[included_destination]',
 						'custom_label_0'              => 'Custom Label 0[custom_label_0]',
 						'custom_label_1'              => 'Custom Label 1[custom_label_1]',
 						'custom_label_2'              => 'Custom Label 2[custom_label_2]',
