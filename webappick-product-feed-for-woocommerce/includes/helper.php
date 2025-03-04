@@ -249,16 +249,16 @@ if ( ! function_exists( 'woo_feed_black_friday_notice' ) ) {
 	 */
 	function woo_feed_black_friday_notice() {
 		$user_id = get_current_user_id();
-		if ( ! get_user_meta( $user_id, 'woo_feed_black_friday_notice_2023_dismissed' ) ) {
+		if ( ! get_user_meta( $user_id, 'woo_feed_black_friday_notice_2024_dismissed' ) ) {
 			ob_start();
 			?>
             <script type="text/javascript">
                 (function ($) {
-                    $(document).on('click', '.woo-feed-ctx-startup-notice button.notice-dismiss', function (e) {
+                    $(document).on('click', '.woo-feed-ctx-black-friday-notice button.notice-dismiss', function (e) {
                         e.preventDefault();
                         let nonce = $('#woo_feed_to_ctx_feed_nonce').val();
                         //woo feed black friday notice cancel callback
-                        wp.ajax.post('woo_feed_save_black_friday_notice_2023_notice', {
+                        wp.ajax.post('woo_feed_save_black_friday_notice', {
                             _wp_ajax_nonce: nonce,
                             clicked: true,
                         }).then(response => {
@@ -269,9 +269,9 @@ if ( ! function_exists( 'woo_feed_black_friday_notice' ) ) {
                     });
                 })(jQuery)
             </script>
-            <a  target="_blank" href="https://webappick.com/plugin/woocommerce-product-feed-pro/?utm_source=BFCM_banner&utm_medium=BFCM_Banner_Free_to_pro&utm_campaign=BFCM23&utm_id=1"
-                class="notice woo-feed-ctx-startup-notice is-dismissible"
-                style="background: url(<?php echo esc_url(WOO_FEED_PLUGIN_URL) . 'admin/images/ctx-feed-black-friday-banner-2023.png'; ?>) no-repeat top center;">
+            <a  target="_blank" href="https://webappick.com/plugin/woocommerce-product-feed-pro/?utm_source=CTX+Feed&utm_medium=BFCM_Banner&utm_campaign=BFCM_24&utm_id=2024"
+                class="notice woo-feed-ctx-black-friday-notice is-dismissible"
+                style="background: url(<?php echo esc_url(WOO_FEED_PLUGIN_URL) . 'admin/images/ctx-feed-black-friday-banner-free.png'; ?>) no-repeat top center;">
                 <input type="hidden" id="woo_feed_to_ctx_feed_nonce"
                        value="<?php echo esc_attr(wp_create_nonce( 'woo-feed-to-ctx-feed-notice' )); ?>">
             </a>
@@ -3529,7 +3529,7 @@ if ( ! function_exists( 'woo_feed_get_approved_reviews_data' ) ) {
 	}
 }
 
-if ( ! function_exists( 'woo_feed_save_black_friday_notice_2023_notice' ) ) {
+if ( ! function_exists( 'woo_feed_save_black_friday_notice' ) ) {
 	/**
 	 * Update user meta to work ctx startup notice once.
 	 *
@@ -3538,11 +3538,11 @@ if ( ! function_exists( 'woo_feed_save_black_friday_notice_2023_notice' ) ) {
 	 * @since 4.3.31
 	 * @author Nazrul Islam Nayan
 	 */
-	function woo_feed_save_black_friday_notice_2023_notice() {
+	function woo_feed_save_black_friday_notice() {
 		if ( isset( $_REQUEST['_wp_ajax_nonce'] ) && wp_verify_nonce( wp_unslash( $_REQUEST['_wp_ajax_nonce'] ), 'woo-feed-to-ctx-feed-notice' ) ) { //phpcs:ignore
 			$user_id = get_current_user_id();
 			if ( isset( $_REQUEST['clicked'] ) ) {
-				$updated_user_meta = add_user_meta( $user_id, 'woo_feed_black_friday_notice_2023_dismissed', 'true', true );
+				$updated_user_meta = add_user_meta( $user_id, 'woo_feed_black_friday_notice_2024_dismissed', 'true', true );
 
 				if ( $updated_user_meta ) {
 					wp_send_json_success( esc_html__( 'User meta updated successfully.', 'woo-feed' ) );
@@ -3556,7 +3556,7 @@ if ( ! function_exists( 'woo_feed_save_black_friday_notice_2023_notice' ) ) {
 		wp_die();
 	}
 }
-add_action( 'wp_ajax_woo_feed_save_black_friday_notice_2023_notice', 'woo_feed_save_black_friday_notice_2023_notice' );
+add_action( 'wp_ajax_woo_feed_save_black_friday_notice', 'woo_feed_save_black_friday_notice' );
 
 
 if ( ! function_exists( 'woo_feed_save_halloween_notice' ) ) {
@@ -6149,6 +6149,77 @@ if ( ! function_exists( 'woo_feed_wcml_save_currency' ) ) {
 			Woo_Feed_Notices::update_woo_feed_notice_dismiss( $type, true );
 		}
 	}
+}
+
+if ( ! function_exists( 'woo_feed_plugin_installing' ) ) {
+    function woo_feed_plugin_installing() {
+        // Handle AJAX request here
+        // For example, get data from request
+        check_ajax_referer( 'woo-feed-our-plugins-nonce', 'nonce' );
+
+        $plugin_slug = isset( $_POST['data'] ) ? sanitize_text_field( $_POST['data'] )  : '';
+
+        $result = woo_feed_install_and_activate_plugin($plugin_slug);
+
+        // Process data
+        // Example response
+        $response = array(
+            'status' => 200,
+            'result' => $result
+        );
+
+        // Send JSON response
+        wp_send_json($response);
+
+        // Don't forget to exit
+        wp_die();
+    }
+}
+
+add_action('wp_ajax_woo_feed_plugin_installing', 'woo_feed_plugin_installing');
+
+if ( ! function_exists( 'woo_feed_install_and_activate_plugin' ) ) {
+    function woo_feed_install_and_activate_plugin($plugin_slug)
+    {
+        // Include necessary WordPress files
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+        require_once ABSPATH . 'wp-admin/includes/plugin-install.php';
+        require_once ABSPATH . 'wp-admin/includes/class-wp-ajax-upgrader-skin.php';
+
+        // Get plugin information from WordPress.org API
+        $api = plugins_api('plugin_information', array('slug' => $plugin_slug));
+
+        if (is_wp_error($api)) {
+            return "failed";
+        }
+
+        // Set up the Plugin Upgrader
+        $upgrader = new Plugin_Upgrader(new WP_Ajax_Upgrader_Skin());
+
+        // Install the plugin
+        $result = $upgrader->install($api->download_link);
+
+        if (is_wp_error($result)) {
+            return "failed";
+        }
+
+        if($plugin_slug=='webappick-pdf-invoice-for-woocommerce') {
+            $plugin_index = 'woo-invoice';
+        }else{
+            $plugin_index = $plugin_slug;
+        }
+
+        // Plugin main file path (assumes plugin directory matches slug)
+        $plugin_path = WP_PLUGIN_DIR . "/{$plugin_slug}/{$plugin_index}.php";
+
+        if (file_exists($plugin_path)) {
+            activate_plugin("{$plugin_slug}/{$plugin_index}.php");
+            return "activated";
+        } else {
+            return "installed";
+        }
+    }
 }
 
 #==== MERCHANT TEMPLATE OVERRIDE END ================#
