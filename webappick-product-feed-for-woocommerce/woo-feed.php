@@ -10,7 +10,7 @@
  * Plugin Name:       CTX Feed
  * Plugin URI:        https://webappick.com/
  * Description:       Easily generate woocommerce product feed for any marketing channel like Google Shopping(Merchant), Facebook Remarketing, Bing, eBay & more. Support 100+ Merchants.
- * Version:           6.5.73
+ * Version:           6.6.1
  * Author:            WebAppick
  * Author URI:        https://webappick.com/
  * License:           GPL v2
@@ -221,6 +221,10 @@ if ( ! function_exists( 'run_woo_feed' ) ) {
 		 */
 		add_action( 'plugins_loaded', array( $plugin, 'run' ), PHP_INT_MAX );
 		add_action( 'admin_notices', 'wooFeed_Admin_Notices' );
+
+        if( isset($_GET['page'] )  && preg_match( '/^webappick\W+/', $_GET['page'] )  ) {
+            add_action( 'admin_notices', 'woo_feed_halloween_notice' );
+        }
 
         //HPOS compatibility
         if( is_plugin_active( 'woocommerce/woocommerce.php' ) ) {
@@ -673,7 +677,6 @@ if ( ! function_exists( 'woo_feed_manage_feed' ) ) {
 				wp_safe_redirect( add_query_arg( array( 'schedule_updated' => $update ), admin_url( 'admin.php?page=webappick-manage-feeds' ) ) );
 				die();
 			}
-			//require WOO_FEED_FREE_ADMIN_PATH . 'partials/woo-feed-manage-list.php';
 		}
 	}
 }
@@ -869,8 +872,6 @@ if ( ! function_exists( 'woo_feed_config_feed' ) ) {
 
 			woo_feed_save_options( $data );
 
-			// $currencyAPI = isset( $_POST['currency_api_code'] ) ? sanitize_text_field( $_POST['currency_api_code'] ) : '';
-			// update_option( 'woo_feed_currency_api_code', $currencyAPI, false );
 
 			if ( isset( $_POST['opt_in'] ) && 'on' === $_POST['opt_in'] ) {
 				WooFeedWebAppickAPI::getInstance()->trackerOptIn();
@@ -1002,4 +1003,26 @@ if ( !function_exists( 'init_rest_api' ) ) {
 }
 
 add_action( 'init', 'init_rest_api' );
+
+add_filter('plugin_row_meta', 'woo_feed_add_custom_link', 10, 2);
+function woo_feed_add_custom_link($links, $file) {
+    if ($file == plugin_basename(__FILE__)) {
+        $links[] = '<a href="https://webappick.com/discount-deal/?utm_source=halloween_25&utm_medium=wp_free&utm_campaign=halloween_25" target="_blank" class="woo-feed-custom-link"><span >🎃 Halloween Special – 30% OFF</span></a>';
+    }
+    return $links;
+}
+
+add_action( 'admin_head', function() {
+    ?>
+    <script type="text/javascript">
+        jQuery(document).ready(function($) {
+            $('a.toplevel_page_tools_page_webappick-feed-halloween-deal, a[href="admin.php?page=webappick-feed-halloween-deal"]').attr({
+                href: 'https://webappick.com/discount-deal/?utm_source=halloween_25&utm_medium=wp_free&utm_campaign=halloween_25',
+                target: '_blank'
+            });
+        });
+    </script>
+    <?php
+});
+
 // End of file woo-feed.php
