@@ -10,7 +10,7 @@
  * Plugin Name:       CTX Feed
  * Plugin URI:        https://webappick.com/
  * Description:       Easily generate woocommerce product feed for any marketing channel like Google Shopping(Merchant), Facebook Remarketing, Bing, eBay & more. Support 100+ Merchants.
- * Version:           6.6.1
+ * Version:           6.6.13
  * Author:            WebAppick
  * Author URI:        https://webappick.com/
  * License:           GPL v2
@@ -223,7 +223,7 @@ if ( ! function_exists( 'run_woo_feed' ) ) {
 		add_action( 'admin_notices', 'wooFeed_Admin_Notices' );
 
         if( isset($_GET['page'] )  && preg_match( '/^webappick\W+/', $_GET['page'] )  ) {
-            add_action( 'admin_notices', 'woo_feed_halloween_notice' );
+            add_action( 'admin_notices', 'woo_feed_christmas_notice' );
         }
 
         //HPOS compatibility
@@ -234,13 +234,7 @@ if ( ! function_exists( 'run_woo_feed' ) ) {
                 }
             } );
         }
-
-		//WooFeedWebAppickAPI::getInstance();
-        add_action('init', function() {
-            // Instantiate classes or run initialization code here
-            WooFeedWebAppickAPI::getInstance();
-        });
-
+		WooFeedWebAppickAPI::getInstance();
 	}
 
 	run_woo_feed();
@@ -1007,7 +1001,7 @@ add_action( 'init', 'init_rest_api' );
 add_filter('plugin_row_meta', 'woo_feed_add_custom_link', 10, 2);
 function woo_feed_add_custom_link($links, $file) {
     if ($file == plugin_basename(__FILE__)) {
-        $links[] = '<a href="https://webappick.com/discount-deal/?utm_source=halloween_25&utm_medium=wp_free&utm_campaign=halloween_25" target="_blank" class="woo-feed-custom-link"><span >🎃 Halloween Special – 30% OFF</span></a>';
+        $links[] = '<a href="https://webappick.com/discount-deal/?utm_source=release-Holiday&utm_medium=free-to-pro&utm_campaign=H-Holiday&utm_id=1" target="_blank" class="woo-feed-custom-link"><span >🎊 Happy Holidays sale! - Get 60% OFF Now!</span></a>';
     }
     return $links;
 }
@@ -1017,7 +1011,7 @@ add_action( 'admin_head', function() {
     <script type="text/javascript">
         jQuery(document).ready(function($) {
             $('a.toplevel_page_tools_page_webappick-feed-halloween-deal, a[href="admin.php?page=webappick-feed-halloween-deal"]').attr({
-                href: 'https://webappick.com/discount-deal/?utm_source=halloween_25&utm_medium=wp_free&utm_campaign=halloween_25',
+                href: 'https://webappick.com/discount-deal/?utm_source=menu-Holiday&utm_medium=free-to-pro&utm_campaign=H-Holiday&utm_id=1',
                 target: '_blank'
             });
         });

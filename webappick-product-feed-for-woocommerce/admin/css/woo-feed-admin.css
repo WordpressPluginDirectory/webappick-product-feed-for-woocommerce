@@ -3029,7 +3029,7 @@ span[id*=cat-map-] {
 }
 /* Basic styling for the div */
 .woo-feed-widget-banner-disco {
-  background-image: url("../images/discount/discount_720.gif");
+  background-image: url("../images/disco/disco_720.png");
   aspect-ratio: 720/250;
   height: auto;
   display: -ms-flexbox;
@@ -3048,20 +3048,20 @@ span[id*=cat-map-] {
 /* Media query for laptop devices */
 @media (min-width: 1024px) {
   .woo-feed-widget-banner-disco {
-    background-image: url("../images/discount/discount_360.gif");
+    background-image: url("../images/disco/disco_360.png");
     aspect-ratio: 360/250;
   }
 }
 /* Media query for large laptop devices */
 @media (min-width: 1440px) {
   .woo-feed-widget-banner-disco {
-    background-image: url("../images/discount/discount_580.gif");
+    background-image: url("../images/disco/disco_580.png");
     aspect-ratio: 580/270;
   }
 }
 /* Basic styling for the div */
 .woo-feed-widget-banner-disco-free {
-  background-image: url("../images/discount/discount_720.gif");
+  background-image: url("../images/disco/disco_720.png");
   aspect-ratio: 720/250;
   height: auto;
   display: -ms-flexbox;
@@ -3080,13 +3080,45 @@ span[id*=cat-map-] {
 /* Media query for laptop devices */
 @media (min-width: 1024px) {
   .woo-feed-widget-banner-disco-free {
-    background-image: url("../images/discount/discount_360.gif");
+    background-image: url("../images/disco/disco_360.png");
     aspect-ratio: 360/250;
   }
 }
 /* Media query for large laptop devices */
 @media (min-width: 1440px) {
   .woo-feed-widget-banner-disco-free {
+    background-image: url("../images/disco/disco_580.png");
+    aspect-ratio: 580/270;
+  }
+}
+/* Basic styling for the div */
+.woo-feed-widget-banner-discount-free {
+  background-image: url("../images/discount/discount_720.gif");
+  aspect-ratio: 720/250;
+  height: auto;
+  display: -ms-flexbox;
+  display: flex;
+  -ms-flex-align: center;
+  align-items: center;
+  -ms-flex-pack: center;
+  justify-content: center;
+  color: white;
+  text-align: center;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+/* Media query for laptop devices */
+@media (min-width: 1024px) {
+  .woo-feed-widget-banner-discount-free {
+    background-image: url("../images/discount/discount_360.gif");
+    aspect-ratio: 360/250;
+  }
+}
+/* Media query for large laptop devices */
+@media (min-width: 1440px) {
+  .woo-feed-widget-banner-discount-free {
     background-image: url("../images/discount/discount_580.gif");
     aspect-ratio: 580/270;
   }
