@@ -1027,6 +1027,13 @@ if ( ! function_exists( 'woo_feed_register_and_do_woo_feed_meta_boxes' ) ) {
 if ( ! function_exists( 'woo_feed_ajax_merchant_info' ) ) {
 	add_action( 'wp_ajax_woo_feed_get_merchant_info', 'woo_feed_ajax_merchant_info' );
 	function woo_feed_ajax_merchant_info() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
 		if ( isset( $_REQUEST['nonce'] ) && wp_verify_nonce(
 			sanitize_text_field( wp_unslash( $_REQUEST['nonce'] ) ),
 			'wpf_feed_nonce'
@@ -2942,6 +2949,13 @@ if ( ! function_exists( 'woo_feed_product_attribute_cache_remove_cb' ) ) {
 	 * This function is called when product attribute swicher click.
 	 */
 	function woo_feed_product_attribute_cache_remove_cb() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
 		$is_nonce_valid = isset( $_POST['nonce'] ) && wp_verify_nonce( sanitize_text_field( $_POST['nonce'] ), 'wpf_feed_nonce' );
 
 		if ( $is_nonce_valid ) {
@@ -2960,6 +2974,13 @@ if ( ! function_exists( 'woo_feed_custom_fields_status_change_cb' ) ) {
 	 * This AJAX callback function is called when custom fields on/off switched
 	 */
 	function woo_feed_custom_fields_status_change_cb() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
 		$is_nonce_valid = isset( $_POST['nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['nonce'] ) ), 'wpf_feed_nonce' );
 
 		if ( $is_nonce_valid && isset(
@@ -3377,6 +3398,13 @@ if ( ! function_exists( 'woo_feed_clear_cache_data' ) ) {
 	 * @since 4.1.2
 	 */
 	function woo_feed_clear_cache_data() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
 		if ( isset( $_REQUEST['_ajax_clean_nonce'] ) ) {
 
             if ( isset( $_POST['type'] ) ) {
@@ -3581,6 +3609,13 @@ if ( ! function_exists( 'woo_feed_save_summer_sale_notice' ) ) {
      * @author Nazrul Islam Nayan
      */
     function woo_feed_save_summer_sale_notice() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
         if ( isset( $_REQUEST['_wp_ajax_nonce'] ) && wp_verify_nonce( wp_unslash( $_REQUEST['_wp_ajax_nonce'] ), 'woo-feed-to-ctx-feed-notice' ) ) { //phpcs:ignore
             $user_id = get_current_user_id();
             if ( isset( $_REQUEST['clicked'] ) ) {
@@ -3610,6 +3645,13 @@ if ( ! function_exists( 'woo_feed_save_black_friday_notice' ) ) {
 	 * @author Nazrul Islam Nayan
 	 */
 	function woo_feed_save_black_friday_notice() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
 		if ( isset( $_REQUEST['_wp_ajax_nonce'] ) && wp_verify_nonce( wp_unslash( $_REQUEST['_wp_ajax_nonce'] ), 'woo-feed-to-ctx-feed-notice' ) ) { //phpcs:ignore
 			$user_id = get_current_user_id();
 			if ( isset( $_REQUEST['clicked'] ) ) {
@@ -3640,6 +3682,13 @@ if ( ! function_exists( 'woo_feed_save_halloween_notice' ) ) {
 	 * @author Nashir Uddin
 	 */
 	function woo_feed_save_halloween_notice() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
 		if ( isset( $_REQUEST['_wp_ajax_nonce'] ) && wp_verify_nonce( wp_unslash( $_REQUEST['_wp_ajax_nonce'] ), 'woo-feed-to-ctx-feed-halloween-nonce' ) ) { //phpcs:ignore
 			$user_id = get_current_user_id();
 			if ( isset( $_REQUEST['clicked'] ) ) {
@@ -3670,6 +3719,13 @@ if ( ! function_exists( 'woo_feed_save_christmas_notice' ) ) {
 	 * @author Md. Nashir Uddin
 	 */
 	function woo_feed_save_christmas_notice() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
 		if ( isset( $_REQUEST['_wp_ajax_nonce'] ) && wp_verify_nonce( wp_unslash( $_REQUEST['_wp_ajax_nonce'] ), 'woo-feed-to-ctx-feed-notice' ) ) { //phpcs:ignore
 			$user_id = get_current_user_id();
 			if ( isset( $_REQUEST['clicked'] ) ) {
@@ -3699,18 +3755,24 @@ if ( ! function_exists( 'woo_feed_hide_promotion' ) ) {
 	 * @since 5.1.7
 	 */
 	function woo_feed_hide_promotion() {
-		if ( isset( $_REQUEST['_ajax_nonce'] ) ) {
-			$hide_promotion = update_option( 'woo_feed_hide_promotion', 1 );
-			$data           = array(
-				'msg' => 'Hide promotion updated successfully.',
-			);
-			if ( $hide_promotion ) {
-				wp_send_json_success( $data );
-			} else {
-				wp_send_json_error( esc_html__( 'Something is wrong.', 'woo-feed' ) );
-			}
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
+		// Verify nonce for security
+		check_ajax_referer( 'wpf_feed_nonce' );
+
+		$hide_promotion = update_option( 'woo_feed_hide_promotion', 1 );
+		$data           = array(
+			'msg' => 'Hide promotion updated successfully.',
+		);
+		if ( $hide_promotion ) {
+			wp_send_json_success( $data );
 		} else {
-			wp_send_json_error( esc_html__( 'Invalid Request.', 'woo-feed' ) );
+			wp_send_json_error( esc_html__( 'Something is wrong.', 'woo-feed' ) );
 		}
 		wp_die();
 	}
@@ -5102,6 +5164,13 @@ if ( ! function_exists( 'woo_feed_filter_count_cb' ) ) {
 	 * @return mixed array | error
 	 */
 	function woo_feed_filter_count_cb() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
 		$is_nonce_valid = isset( $_GET['nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_GET['nonce'] ) ), 'wpf_feed_nonce' );
 
 		if ( $is_nonce_valid ) {
@@ -6054,7 +6123,15 @@ if ( ! function_exists( 'get_woo_feed_attribute_highlighted' ) ) {
 	}
 }
 if ( ! function_exists( 'woo_feed_add_product_attribute_is_highlighted' ) ) {
+
 	function woo_feed_add_product_attribute_is_highlighted( $attribute, $i = 0 ) {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
+
 		$value = get_woo_feed_attribute_highlighted( $attribute->get_name(), $i );
 		?>
 		<tr>
@@ -6081,6 +6158,12 @@ if ( ! function_exists( 'woo_feed_ajax_woocommerce_save_attributes' ) ) {
 	 */
 
 	function woo_feed_ajax_woocommerce_save_attributes() {
+
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            woo_feed_log_debug_message( 'User doesnt have enough permission.' );
+            wp_send_json_error( esc_html__( 'Unauthorized Action.', 'woo-feed' ),403 );
+            die();
+        }
 
 		check_ajax_referer( 'save-attributes', 'security' );
 
