@@ -81,6 +81,43 @@ class CategoryMappingEndpoint extends RestController {
 	const TAXONOMY_PARSE_CACHE_PREFIX = 'ctxfeed_taxonomy_parsed_';
 
 	/**
+	 * Templates that search the bundled Google product taxonomy.
+	 *
+	 * @since 8.0.23
+	 * @var string[]
+	 */
+	const GOOGLE_TAXONOMY_TEMPLATES = array(
+		'google',
+		'google_shopping',
+		'google_local',
+		'google_local_inventory',
+		'google_shopping_promotions',
+		'google_dynamic_search_ads',
+		'google_manufacturer',
+		'pinterest',
+		'pinterest_rss',
+		'bing',
+		'bing_shopping',
+		'snapchat',
+		'tiktok',
+		'ideal',
+		'pricepy',
+		'become',
+	);
+
+	/**
+	 * Templates that search the bundled Facebook product taxonomy.
+	 *
+	 * @since 8.0.23
+	 * @var string[]
+	 */
+	const FACEBOOK_TAXONOMY_TEMPLATES = array(
+		'facebook',
+		'facebook_catalog',
+		'instagram',
+	);
+
+	/**
 	 * Default page size for the paginated categories endpoint. Matches
 	 * V5's `stringsDocs.categoryPaginationLength` so the two UIs behave
 	 * identically for the customer.
@@ -106,13 +143,34 @@ class CategoryMappingEndpoint extends RestController {
 					'methods'             => \WP_REST_Server::READABLE,
 					'callback'            => array( $this, 'get_mappings' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(),
 				),
 				array(
 					'methods'             => \WP_REST_Server::CREATABLE,
 					'callback'            => array( $this, 'create_mapping' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(
+						'name'     => array(
+							'required'          => true,
+							'type'              => 'string',
+							'validate_callback' => array( $this, 'validate_non_blank_string' ),
+							'sanitize_callback' => 'sanitize_text_field',
+							'description'       => __( 'Display name; the stored option slug derives from it.', 'woo-feed' ),
+						),
+						'template' => array(
+							'required'          => true,
+							'type'              => 'string',
+							'validate_callback' => array( $this, 'validate_non_blank_string' ),
+							'sanitize_callback' => 'sanitize_text_field',
+							'description'       => __( 'Merchant template key the mapping targets (e.g. google).', 'woo-feed' ),
+						),
+						'mappings' => array(
+							'description' => __( 'Category rows: either [ { "<wc_cat_id>": "<merchant value>" }, ... ] or one flat { id: value } object — both accepted shapes are preserved.', 'woo-feed' ),
+						),
+					),
 				),
-			) 
+				'schema' => array( $this, 'get_mapping_response_schema' ),
+			)
 		);
 
 		// WooCommerce product categories (hierarchical, cached, paginated).
@@ -131,13 +189,18 @@ class CategoryMappingEndpoint extends RestController {
 				'args'                => array(
 					'page'     => array(
 						'type'              => 'integer',
+						'minimum'           => 1,
 						'default'           => 1,
+						'validate_callback' => 'rest_validate_request_arg',
 						'sanitize_callback' => 'absint',
 					),
 					'per_page' => array(
 						'type'              => 'integer',
+						'minimum'           => 1,
 						'default'           => self::CAT_DEFAULT_PER_PAGE,
+						'validate_callback' => 'rest_validate_request_arg',
 						'sanitize_callback' => 'absint',
+						'description'       => __( 'Items per page; the server caps oversized values.', 'woo-feed' ),
 					),
 					'search'   => array(
 						'type'              => 'string',
@@ -163,15 +226,20 @@ class CategoryMappingEndpoint extends RestController {
 				'args'                => array(
 					'template' => array(
 						'required'          => true,
+						'type'              => 'string',
+						'validate_callback' => array( $this, 'validate_non_blank_string' ),
 						'sanitize_callback' => 'sanitize_text_field',
 					),
 					'search'   => array(
+						'type'              => 'string',
 						'default'           => '',
 						'sanitize_callback' => 'sanitize_text_field',
 					),
 					'ids'      => array(
+						'type'              => 'string',
 						'default'           => '',
 						'sanitize_callback' => 'sanitize_text_field',
+						'description'       => __( 'Comma-separated merchant category IDs to hydrate labels for.', 'woo-feed' ),
 					),
 				),
 			) 
@@ -186,18 +254,66 @@ class CategoryMappingEndpoint extends RestController {
 					'methods'             => \WP_REST_Server::READABLE,
 					'callback'            => array( $this, 'get_mapping' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(),
 				),
 				array(
 					'methods'             => \WP_REST_Server::EDITABLE,
 					'callback'            => array( $this, 'update_mapping' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(
+						// A typo'd type (e.g. 'appendd') used to silently mean
+						// REPLACE-everything — the most destructive reading of
+						// a mistyped request. It now 400s (CBT-588).
+						'type' => array(
+							'type'              => 'string',
+							'enum'              => array( 'append', 'replace' ),
+							'validate_callback' => 'rest_validate_request_arg',
+							'description'       => __( "How 'mappings' applies: 'append' merges rows into the existing map (a row sent with an empty value CLEARS that category), 'replace' (or omitted) swaps the whole map.", 'woo-feed' ),
+						),
+					),
 				),
 				array(
 					'methods'             => \WP_REST_Server::DELETABLE,
 					'callback'            => array( $this, 'delete_mapping' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(),
 				),
-			) 
+				'schema' => array( $this, 'get_mapping_response_schema' ),
+			)
+		);
+	}
+
+	/**
+	 * Response schema shared by the mapping collection and item routes (CBT-588).
+	 *
+	 * @since 8.0.22
+	 *
+	 * @return array
+	 */
+	public function get_mapping_response_schema(): array {
+		return array(
+			'$schema'    => 'http://json-schema.org/draft-04/schema#',
+			'title'      => 'ctxfeed-category-mapping',
+			'type'       => 'object',
+			'properties' => array(
+				'success' => array( 'type' => 'boolean' ),
+				'data'    => array(
+					'type'       => 'object',
+					'properties' => array(
+						'message'     => array( 'type' => 'string' ),
+						'option_name' => array( 'type' => 'string' ),
+						'data'        => array(
+							'type'       => 'object',
+							'properties' => array(
+								'name'        => array( 'type' => 'string' ),
+								'template'    => array( 'type' => 'string' ),
+								'mappings'    => array( 'type' => 'object' ),
+								'option_name' => array( 'type' => 'string' ),
+							),
+						),
+					),
+				),
+			),
 		);
 	}
 
@@ -304,7 +420,13 @@ class CategoryMappingEndpoint extends RestController {
 		$i         = 0;
 
 		while ( is_string( $value ) && is_serialized( $value ) && $i < $max_depth ) {
-			$value = maybe_unserialize( $value );
+			// Sanitizer::safe_unserialize, NOT maybe_unserialize: WP core's
+			// helper unserializes without allowed_classes=false, so a crafted
+			// serialized mapping row would instantiate live objects (PHP
+			// object injection — the class the CTX-908 fix closed everywhere
+			// else; this path had slipped through). Same maybe_unserialize
+			// semantics otherwise: plain arrays/scalars round-trip unchanged.
+			$value = \CTXFeed\V8\Utility\Sanitizer::safe_unserialize( $value );
 			++$i;
 		}
 
@@ -496,6 +618,11 @@ class CategoryMappingEndpoint extends RestController {
 		// Flatten to single object.
 		$flat_mappings = $this->flatten_mappings( $mappings );
 
+		$invalid = $this->invalid_taxonomy_values( $template, $flat_mappings );
+		if ( ! empty( $invalid ) ) {
+			return $this->invalid_taxonomy_error( $template, $invalid );
+		}
+
 		// Convert to V5 format for storage.
 		$config = $this->v8_to_v5( $name, $template, $flat_mappings );
 
@@ -575,9 +702,13 @@ class CategoryMappingEndpoint extends RestController {
 		$final_name     = ! empty( $body['name'] ) ? sanitize_text_field( $body['name'] ) : $current['name'];
 		$final_template = ! empty( $body['template'] ) ? sanitize_text_field( $body['template'] ) : $current['template'];
 
-		// Handle mappings — check for append mode.
+		// Handle mappings — check for append mode. Empties are KEPT through
+		// flattening here: an explicitly-sent `key => ''` is the editor's
+		// clear marker, and dropping it before the merge made unmapping a
+		// category silently non-persistent (CBT-590) — the UI said "Saved"
+		// while the stored value survived every reload.
 		$type         = $request->get_param( 'type' );
-		$new_mappings = isset( $body['mappings'] ) ? $this->flatten_mappings( $body['mappings'] ) : null;
+		$new_mappings = isset( $body['mappings'] ) ? $this->flatten_mappings( $body['mappings'], true ) : null;
 
 		if ( null !== $new_mappings ) {
 			if ( 'append' === $type ) {
@@ -585,19 +716,37 @@ class CategoryMappingEndpoint extends RestController {
 				// (NOT array_merge) because category IDs are numeric-string
 				// keys — array_merge would treat them as sequential ints
 				// and REINDEX, silently corrupting every mapping's key.
-				// array_replace preserves keys and overwrites on collision,
-				// which is the correct "append this one row" semantic the
-				// React autosave flow depends on.
+				// array_replace preserves keys and overwrites on collision;
+				// a '' value overwrites the stored one and is stripped
+				// below, which is what deletes the row (CBT-590).
 				$final_mappings = array_replace( (array) $current['mappings'], $new_mappings );
 			} else {
 				// Replace all mappings.
 				$final_mappings = $new_mappings;
 			}
+
+			// '' entries did their job (clearing on merge) — never store them.
+			$final_mappings = array_filter(
+				$final_mappings,
+				static function ( $value ) {
+					return '' !== (string) $value;
+				}
+			);
 		} else {
 			$final_mappings = $current['mappings'];
 		}
 
 		// Convert to V5 format for storage.
+		// Taxonomy channels only accept values from their list (CBT-609):
+		// validate the rows this request sent (existing rows were validated
+		// when they were saved; '' is the editor's clear marker).
+		if ( null !== $new_mappings ) {
+			$invalid = $this->invalid_taxonomy_values( $final_template, $new_mappings );
+			if ( ! empty( $invalid ) ) {
+				return $this->invalid_taxonomy_error( $final_template, $invalid );
+			}
+		}
+
 		$config = $this->v8_to_v5( $final_name, $final_template, (array) $final_mappings );
 
 		update_option( $option_name, $config, false );
@@ -755,7 +904,9 @@ class CategoryMappingEndpoint extends RestController {
 		foreach ( $terms as $term ) {
 			$categories[] = array(
 				'id'        => $term->term_id,
-				'name'      => $term->name,
+				// Stored entity-encoded by wp_insert_term(); the React picker
+				// renders plain text (CBT-658).
+				'name'      => wp_specialchars_decode( (string) $term->name, ENT_QUOTES ),
 				'slug'      => $term->slug,
 				'parent'    => $term->parent,
 				'count'     => $term->count,
@@ -819,12 +970,12 @@ class CategoryMappingEndpoint extends RestController {
 	 * @return string Hierarchy string, e.g. "Clothing > T-Shirts > V-Neck".
 	 */
 	private function build_hierarchy( \WP_Term $term, array $term_map ): string {
-		$parts   = array( $term->name );
+		$parts   = array( wp_specialchars_decode( (string) $term->name, ENT_QUOTES ) );
 		$current = $term;
 
 		while ( $current->parent > 0 && isset( $term_map[ $current->parent ] ) ) {
 			$current = $term_map[ $current->parent ];
-			array_unshift( $parts, $current->name );
+			array_unshift( $parts, wp_specialchars_decode( (string) $current->name, ENT_QUOTES ) );
 		}
 
 		return implode( ' > ', $parts );
@@ -870,18 +1021,23 @@ class CategoryMappingEndpoint extends RestController {
 		// only; no substring behavior, no 50-item cap (a page holds up to
 		// per_page mappings, so the caller controls the size).
 		if ( ! empty( $ids ) ) {
+			// Exact matches only. A request whose ids are all non-numeric
+			// used to skip this branch and fall through to list mode,
+			// handing the editor the first 50 categories — which it then
+			// showed as the row's mapped label (CBT-609 / BUG-0094).
 			$requested = array_filter( array_map( 'absint', explode( ',', $ids ) ) );
-			if ( ! empty( $requested ) ) {
-				$as_set     = array_flip( $requested );
-				$categories = array_values(
-					array_filter(
-						$categories,
-						static function ( $cat ) use ( $as_set ) {
-							return isset( $as_set[ (int) $cat['id'] ] );
-						}
-					) 
-				);
+			if ( empty( $requested ) ) {
+				return $this->success( array() );
 			}
+			$as_set     = array_flip( $requested );
+			$categories = array_values(
+				array_filter(
+					$categories,
+					static function ( $cat ) use ( $as_set ) {
+						return isset( $as_set[ (int) $cat['id'] ] );
+					}
+				)
+			);
 			return $this->success( $categories );
 		}
 
@@ -908,65 +1064,141 @@ class CategoryMappingEndpoint extends RestController {
 	}
 
 	/**
+	 * Mapping values that are not in the channel's taxonomy (CBT-609 / BUG-0094).
+	 *
+	 * Owner rule: when a channel has a taxonomy list the API can search,
+	 * a custom value must NOT be stored (the editor's picker already
+	 * prevents it; this closes the REST/MCP path). Channels without a
+	 * list keep free text (CBT-596). Empty values (unmapped / the
+	 * editor's clear marker) are never invalid.
+	 *
+	 * @since 8.0.24
+	 *
+	 * @param string               $template Template key.
+	 * @param array<string,string> $mappings Flat `wc_cat_id => value` map.
+	 * @return array<string,string> Offending `wc_cat_id => value` pairs.
+	 */
+	private function invalid_taxonomy_values( string $template, array $mappings ): array {
+		if ( ! self::has_taxonomy( $template ) ) {
+			return array();
+		}
+
+		$file_path = $this->resolve_taxonomy_file( $template );
+		if ( ! $file_path || ! file_exists( $file_path ) ) {
+			return array();
+		}
+
+		$known = array();
+		foreach ( $this->parse_taxonomy_file( $file_path, $template ) as $cat ) {
+			$known[ (string) $cat['id'] ] = true;
+		}
+		if ( empty( $known ) ) {
+			return array(); // Unreadable list — never lock the merchant out.
+		}
+
+		$invalid = array();
+		foreach ( $mappings as $cat_id => $value ) {
+			$value = trim( (string) $value );
+			if ( '' === $value ) {
+				continue;
+			}
+			// A stored "1604 - Apparel > Clothing" label form is accepted by id.
+			$candidate = preg_match( '/^(\d+)\s*-\s/', $value, $m ) ? $m[1] : $value;
+			if ( ! isset( $known[ $candidate ] ) ) {
+				$invalid[ (string) $cat_id ] = $value;
+			}
+		}
+
+		return $invalid;
+	}
+
+	/**
+	 * 400 response for values outside the channel taxonomy.
+	 *
+	 * @since 8.0.24
+	 *
+	 * @param string               $template Template key.
+	 * @param array<string,string> $invalid  Offending `wc_cat_id => value` pairs.
+	 * @return \WP_REST_Response
+	 */
+	private function invalid_taxonomy_error( string $template, array $invalid ): \WP_REST_Response {
+		$pairs = array();
+		foreach ( $invalid as $cat_id => $value ) {
+			$pairs[] = $cat_id . ' => "' . $value . '"';
+		}
+
+		return $this->error(
+			sprintf(
+				/* translators: 1: template key, 2: offending "wc_cat_id => value" pairs. */
+				__( 'The %1$s channel only accepts values from its category taxonomy. Not in the list: %2$s. Use the template-categories lookup to find valid ids.', 'woo-feed' ),
+				$template,
+				implode( ', ', $pairs )
+			),
+			400
+		);
+	}
+
+	/**
+	 * Whether a template has a channel taxonomy list to search.
+	 *
+	 * True for the Google family (bundled google_taxonomy.txt, or the
+	 * uploads override), the Facebook family (fb_taxonomy.txt), or any
+	 * template with a bundled `{template}_taxonomy.txt`. Every other
+	 * channel maps categories as FREE TEXT (V5 parity: only the
+	 * "suggestive list" merchants ever had a dropdown) — the editor
+	 * renders a plain input and the typed value ships literally.
+	 *
+	 * @since 8.0.23
+	 *
+	 * @param string $template Template/merchant key.
+	 * @return bool
+	 */
+	public static function has_taxonomy( string $template ): bool {
+		$template = strtolower( trim( $template ) );
+
+		if ( '' === $template ) {
+			return false;
+		}
+
+		if ( in_array( $template, self::GOOGLE_TAXONOMY_TEMPLATES, true )
+			|| in_array( $template, self::FACEBOOK_TAXONOMY_TEMPLATES, true ) ) {
+			return true;
+		}
+
+		$generic = TemplateLocator::taxonomy_dir() . $template . '_taxonomy.txt';
+
+		return '' !== TemplateLocator::taxonomy_dir() && file_exists( $generic );
+	}
+
+	/**
 	 * Resolve a template key to the local taxonomy file path.
 	 *
-	 * Maps common template identifiers to their taxonomy file.
-	 * Google Shopping, Facebook Catalog, and their variants all
-	 * use the same taxonomy files.
+	 * Google Shopping, Facebook Catalog, and their variants all use the
+	 * same taxonomy files. Templates without a list resolve to null — the
+	 * pre-8.0.23 "fall back to Google" branch is gone (CBT-596): it made
+	 * every channel look searchable and hid the free-text mapping V5 had.
 	 *
 	 * @since 8.0.0
+	 * @since 8.0.23 No Google fallback for unknown templates.
 	 *
 	 * @param string $template Template/merchant key.
 	 * @return string|null File path or null if unsupported.
 	 */
 	private function resolve_taxonomy_file( string $template ): ?string {
-		$taxonomy_dir = TemplateLocator::taxonomy_dir();
-		$template     = strtolower( $template );
+		$template = strtolower( $template );
 
-		// Map templates to their taxonomy files.
-		$google_templates = array(
-			'google',
-			'google_shopping',
-			'google_local',
-			'google_local_inventory',
-			'google_shopping_promotions',
-			'google_dynamic_search_ads',
-			'google_manufacturer',
-			'pinterest',
-			'pinterest_rss',
-			'bing',
-			'bing_shopping',
-			'snapchat',
-			'tiktok',
-			'ideal',
-			'pricepy',
-			'become',
-		);
-
-		$facebook_templates = array(
-			'facebook',
-			'facebook_catalog',
-			'instagram',
-		);
-
-		if ( in_array( $template, $google_templates, true ) ) {
+		if ( in_array( $template, self::GOOGLE_TAXONOMY_TEMPLATES, true ) ) {
 			return $this->google_taxonomy_path();
 		}
 
-		if ( in_array( $template, $facebook_templates, true ) ) {
-			return $taxonomy_dir . 'fb_taxonomy.txt';
+		if ( in_array( $template, self::FACEBOOK_TAXONOMY_TEMPLATES, true ) ) {
+			return TemplateLocator::taxonomy_dir() . 'fb_taxonomy.txt';
 		}
 
-		// Try a generic file.
-		$generic = $taxonomy_dir . $template . '_taxonomy.txt';
+		// A bundled generic file, if the channel ships one.
+		$generic = TemplateLocator::taxonomy_dir() . $template . '_taxonomy.txt';
 		if ( file_exists( $generic ) ) {
 			return $generic;
-		}
-
-		// Fallback to Google taxonomy (most merchants use Google categories).
-		$google_file = $this->google_taxonomy_path();
-		if ( file_exists( $google_file ) ) {
-			return $google_file;
 		}
 
 		return null;
@@ -1123,8 +1355,10 @@ class CategoryMappingEndpoint extends RestController {
 	 *
 	 * @param mixed $mappings Raw mappings from request.
 	 * @return array Flat associative array of category_id => category_value.
+	 * @param bool  $keep_empty Keep explicitly-sent empty values (the update
+	 *                           path's clear markers — CBT-590).
 	 */
-	private function flatten_mappings( $mappings ): array {
+	private function flatten_mappings( $mappings, bool $keep_empty = false ): array {
 		if ( ! is_array( $mappings ) ) {
 			return array();
 		}
@@ -1135,16 +1369,16 @@ class CategoryMappingEndpoint extends RestController {
 		if ( isset( $mappings[0] ) && is_array( $mappings[0] ) ) {
 			foreach ( $mappings as $group ) {
 				foreach ( (array) $group as $cat_id => $cat_value ) {
-					if ( ! empty( $cat_value ) ) {
-						$flat[ (string) $cat_id ] = sanitize_text_field( $cat_value );
+					if ( ! empty( $cat_value ) || $keep_empty ) {
+						$flat[ (string) $cat_id ] = sanitize_text_field( (string) $cat_value );
 					}
 				}
 			}
 		} else {
 			// Already a flat associative array.
 			foreach ( $mappings as $cat_id => $cat_value ) {
-				if ( ! empty( $cat_value ) ) {
-					$flat[ (string) $cat_id ] = sanitize_text_field( $cat_value );
+				if ( ! empty( $cat_value ) || $keep_empty ) {
+					$flat[ (string) $cat_id ] = sanitize_text_field( (string) $cat_value );
 				}
 			}
 		}

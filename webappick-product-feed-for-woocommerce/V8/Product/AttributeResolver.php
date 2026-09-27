@@ -19,6 +19,8 @@
 namespace CTXFeed\V8\Product;
 
 use CTXFeed\V8\Core\Config;
+use CTXFeed\V8\Core\Logger;
+use CTXFeed\V8\Utility\Sanitizer;
 
 // Exit if accessed directly.
 if ( ! defined( 'ABSPATH' ) ) {
@@ -113,20 +115,46 @@ class AttributeResolver {
 	private $wp_option;
 
 	/**
-	 * Attribute mapping resolver instance.
+	 * Attribute-mapping engine (Pro); null when the Pro plugin is absent.
 	 *
 	 * @since 8.0.0
-	 * @var AttributeMappingResolver
+	 * @var PrefixResolverInterface|null
 	 */
 	private $attr_mapping;
 
 	/**
-	 * Dynamic attribute resolver instance.
+	 * Dynamic-attribute engine (Pro); null when the Pro plugin is absent.
 	 *
 	 * @since 8.0.0
-	 * @var DynamicAttributeResolver
+	 * @var PrefixResolverInterface|null
 	 */
 	private $dynamic_attr;
+
+	/**
+	 * Prefix resolvers registered through `register_prefix_resolver()` /
+	 * the `ctxfeed_attribute_prefix_resolvers` filter (CBT-642).
+	 *
+	 * @since 8.0.27
+	 * @var PrefixResolverInterface[]
+	 */
+	private $prefix_resolvers = array();
+
+	/**
+	 * Source-name prefixes owned by Pro engines. When no resolver claims one
+	 * of these (Pro absent), the value is '' — never a stray meta lookup.
+	 *
+	 * @since 8.0.27
+	 * @var string[]
+	 */
+	private const PRO_PREFIXES = array( 'wf_dattribute_', 'wp_attr_mapping_', 'acf_fields_', 'toolset_fields_' );
+
+	/**
+	 * Pro prefixes already reported as unhandled in this request.
+	 *
+	 * @since 8.0.27
+	 * @var array<string,bool>
+	 */
+	private static $unhandled_logged = array();
 
 	/**
 	 * V5-compat custom field resolver (woo_feed_* identifier path).
@@ -169,8 +197,8 @@ class AttributeResolver {
 	 * @param ShippingResolver             $shipping     Shipping resolver.
 	 * @param TaxResolver                  $tax          Tax resolver.
 	 * @param WpOptionResolver             $wp_option    WordPress option resolver.
-	 * @param AttributeMappingResolver     $attr_mapping Attribute mapping resolver.
-	 * @param DynamicAttributeResolver     $dynamic_attr Dynamic attribute resolver.
+	 * @param PrefixResolverInterface|null $attr_mapping Attribute mapping engine (Pro), or null.
+	 * @param PrefixResolverInterface|null $dynamic_attr Dynamic attribute engine (Pro), or null.
 	 * @param V5CustomFieldResolver|null   $v5_custom_field   V5-compat woo_feed_*
 	 *                                                       resolver. Optional for
 	 *                                                       back-compat with older
@@ -191,8 +219,8 @@ class AttributeResolver {
 		ShippingResolver $shipping,
 		TaxResolver $tax,
 		WpOptionResolver $wp_option,
-		AttributeMappingResolver $attr_mapping,
-		DynamicAttributeResolver $dynamic_attr,
+		?PrefixResolverInterface $attr_mapping = null,
+		?PrefixResolverInterface $dynamic_attr = null,
 		?V5CustomFieldResolver $v5_custom_field = null,
 		?CategoryMappingResolver $category_mapping = null
 	) {
@@ -210,6 +238,232 @@ class AttributeResolver {
 		$this->dynamic_attr     = $dynamic_attr;
 		$this->v5_custom_field  = $v5_custom_field;
 		$this->category_mapping = $category_mapping;
+	}
+
+	/**
+	 * Register a prefix resolver (Pro engines, third parties).
+	 *
+	 * Registered resolvers are consulted after the constructor-injected
+	 * mapping / dynamic-attribute engines, in registration order. The
+	 * resolver receives this router so nested source attributes resolve.
+	 *
+	 * @since 8.0.27
+	 * @implements PROD-FRD-10 (extension seam, CBT-642)
+	 *
+	 * @param PrefixResolverInterface $resolver Prefix resolver.
+	 *
+	 * @return void
+	 */
+	public function register_prefix_resolver( PrefixResolverInterface $resolver ): void {
+		$this->prefix_resolvers[] = $resolver;
+		$resolver->set_attribute_resolver( $this );
+	}
+
+	/**
+	 * Registered prefix resolvers (constructor-injected engines excluded).
+	 *
+	 * @since 8.0.27
+	 *
+	 * @return PrefixResolverInterface[]
+	 */
+	public function get_prefix_resolvers(): array {
+		return $this->prefix_resolvers;
+	}
+
+	/**
+	 * Resolve a Pro-prefixed source attribute through the registered engines.
+	 *
+	 * Returns null when no resolver claims the name so the caller keeps its
+	 * ordinary fall-through; returns '' (logged once per prefix and request)
+	 * when the name carries a known Pro prefix that nothing handles — the
+	 * graceful-degradation contract for a free install (CBT-642).
+	 *
+	 * @since 8.0.27
+	 *
+	 * @param \WC_Product $product       WooCommerce product.
+	 * @param string      $attr          Source attribute name.
+	 * @param Config      $config        Feed configuration.
+	 * @param string      $merchant_attr Channel field name.
+	 *
+	 * @return string|null
+	 */
+	private function resolve_prefixed( \WC_Product $product, string $attr, Config $config, string $merchant_attr ): ?string {
+		foreach ( $this->prefix_resolvers as $resolver ) {
+			if ( $resolver->handles( $attr ) ) {
+				return $resolver->resolve( $product, $attr, $config, $merchant_attr );
+			}
+		}
+
+		foreach ( self::PRO_PREFIXES as $prefix ) {
+			if ( 0 === strpos( $attr, $prefix ) ) {
+				if ( ! isset( self::$unhandled_logged[ $prefix ] ) ) {
+					self::$unhandled_logged[ $prefix ] = true;
+					Logger::debug(
+						'Source attribute prefix has no resolver (CTX Feed Pro inactive?) — value left empty.',
+						array(
+							'prefix'    => $prefix,
+							'attribute' => $attr,
+						)
+					);
+				}
+				return '';
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * SEO-plugin attribute keys offered by the value picker (AttributeRegistry
+	 * + SeoCompatibilityProvider dropdowns). In feed ROWS these resolve to raw
+	 * meta and are then completed by the Legacy Bridge
+	 * `woo_feed_filter_product_{attr}` filter that the compatibility/Shims/
+	 * SEO classes answer. Mapping/dynamic-attribute paths bypass the bridge,
+	 * so they must route through resolve_seo_bridged() (#69018 — Attribute
+	 * Mapping printed the literal key name instead).
+	 *
+	 * @since 8.0.16
+	 * @var array<string,bool>
+	 */
+	private const SEO_ATTRIBUTES = array(
+		'yoast_wpseo_title'       => true,
+		'yoast_wpseo_metadesc'    => true,
+		'yoast_canonical_url'     => true,
+		'yoast_primary_category'  => true,
+		'yoast_gtin8'             => true,
+		'yoast_gtin12'            => true,
+		'yoast_gtin13'            => true,
+		'yoast_gtin14'            => true,
+		'yoast_isbn'              => true,
+		'yoast_mpn'               => true,
+		'rank_math_title'         => true,
+		'rank_math_description'   => true,
+		'rank_math_canonical_url' => true,
+		'rank_math_gtin'          => true,
+		'_aioseop_title'          => true,
+		'_aioseop_description'    => true,
+		'_aioseop_canonical_url'  => true,
+	);
+
+	/**
+	 * Whether an attribute key is one of the SEO-plugin picker attributes.
+	 *
+	 * @since 8.0.16
+	 *
+	 * @param string $attr Attribute key.
+	 * @return bool
+	 */
+	public static function is_seo_attribute( string $attr ): bool {
+		return isset( self::SEO_ATTRIBUTES[ $attr ] );
+	}
+
+	/**
+	 * Source attributes whose Legacy Bridge hook is fired ONCE by
+	 * PriceResolver on the raw value (V5 timing). Firing it again on a
+	 * resolved value double-applies a multiplicative currency shim
+	 * (24 → 48 → 96) — the same list ProductRepository skips at row level.
+	 *
+	 * @since 8.0.28
+	 * @var array<string,true>
+	 */
+	private const PRICE_FAMILY = array(
+		'price'                  => true,
+		'regular_price'          => true,
+		'sale_price'             => true,
+		'current_price'          => true,
+		'price_with_tax'         => true,
+		'regular_price_with_tax' => true,
+		'sale_price_with_tax'    => true,
+		'current_price_with_tax' => true,
+	);
+
+	/**
+	 * Whether an attribute key belongs to the price family (bridge fired by
+	 * PriceResolver, never again downstream).
+	 *
+	 * @since 8.0.28
+	 *
+	 * @param string $attr Attribute key.
+	 * @return bool
+	 */
+	public static function is_price_family( string $attr ): bool {
+		return isset( self::PRICE_FAMILY[ $attr ] );
+	}
+
+	/**
+	 * Resolve an attribute exactly the way a feed ROW does: raw resolver
+	 * value, then the Legacy Bridge `woo_feed_filter_product_{attr}` filter
+	 * (same 4-arg signature as ProductRepository::resolve_with_filters,
+	 * variation parent included) so every V5 compat listener — the
+	 * TranslatePress / WPML / Polylang title shims, the SEO shims, customer
+	 * snippets — computes the value it computes for a row.
+	 *
+	 * Used by AttributeMappingResolver and DynamicAttributeResolver for the
+	 * PARTS they combine: their plain resolve() calls bypass the bridge, so a
+	 * German feed shipped the untranslated title inside an attribute mapping
+	 * while the same title translated as a direct row (#69269, CBT-662).
+	 * V5 resolved parts through the ProductInfo getters that fired the
+	 * filters, so this is parity restoration; 8.0.16 restored it for the
+	 * SEO keys only (#69018), this generalises it.
+	 *
+	 * Price-family attributes are resolved WITHOUT the bridge — PriceResolver
+	 * fires their hook once on the raw value, and a second fire is the
+	 * double-apply currency bug (see PRICE_FAMILY). Deliberately NOT wired
+	 * into the row path either — rows already fire the bridge once.
+	 *
+	 * @since 8.0.28
+	 *
+	 * @param \WC_Product $product WooCommerce product.
+	 * @param string      $attr    Source attribute key.
+	 * @param Config      $config  Feed configuration.
+	 * @return string
+	 */
+	public function resolve_bridged( \WC_Product $product, string $attr, Config $config ): string {
+		$value = $this->resolve(
+			$product,
+			array(
+				'type'    => 'attribute',
+				'wc_attr' => $attr,
+				'default' => '',
+			),
+			$config
+		);
+
+		if ( self::is_price_family( $attr ) ) {
+			return is_scalar( $value ) ? (string) $value : '';
+		}
+
+		$legacy_filter = "woo_feed_filter_product_{$attr}";
+
+		if ( has_filter( $legacy_filter ) ) {
+			$parent_product = null;
+			if ( $product->is_type( 'variation' ) ) {
+				$parent_id      = $product->get_parent_id();
+				$parent_product = $parent_id ? ProductMemo::get( (int) $parent_id ) : null;
+			}
+
+			// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.DynamicHooknameFound -- Built above as "woo_feed_filter_product_{$attr}", always carrying the registered woo_feed prefix; the sniff cannot resolve the variable.
+			$value = apply_filters( $legacy_filter, $value, $product, $config, $parent_product );
+		}
+
+		return is_scalar( $value ) ? (string) $value : '';
+	}
+
+	/**
+	 * Resolve an SEO attribute through the Legacy Bridge (#69018).
+	 *
+	 * Kept as an alias of {@see resolve_bridged()} for callers written
+	 * against 8.0.16–8.0.27; the general method covers every attribute.
+	 *
+	 * @since 8.0.16
+	 *
+	 * @param \WC_Product $product WooCommerce product.
+	 * @param string      $attr    SEO attribute key.
+	 * @param Config      $config  Feed configuration.
+	 * @return string
+	 */
+	public function resolve_seo_bridged( \WC_Product $product, string $attr, Config $config ): string {
+		return $this->resolve_bridged( $product, $attr, $config );
 	}
 
 	/**
@@ -243,12 +497,22 @@ class AttributeResolver {
 				break;
 
 			case 'custom_field':
-				$value = $this->custom_field->resolve( $product, $wc_attr, $config );
+				// A custom_field row may carry a Pro picker prefix (acf_fields_ /
+				// toolset_fields_): the registered prefix engine owns it, and an
+				// unclaimed Pro prefix ships '' (CBT-652).
+				$value = $this->resolve_prefixed( $product, (string) $wc_attr, $config, $merchant_attr );
+				if ( null === $value ) {
+					$value = $this->custom_field->resolve( $product, $wc_attr, $config );
+				}
 				break;
 
 			case 'pattern':
 			case 'text': // V8-UI alias briefly written for static rows — same semantics.
 				$value = isset( $mapping['value'] ) ? $mapping['value'] : ( isset( $mapping['default'] ) ? $mapping['default'] : '' );
+				// Feeds saved on 8.0.16–8.0.23 stored `>` / `&` as entities
+				// (CBT-607): restore the typed characters at generation so
+				// existing feeds heal without an option rewrite.
+				$value = Sanitizer::restore_text( $value );
 				break;
 
 			case 'image':
@@ -285,12 +549,31 @@ class AttributeResolver {
 		// variations' sale prices (WC_Product_Variable semantics) — i.e.
 		// a SIBLING's discount — telling Google a full-price variant is
 		// on sale. Same reasoning for the sale date fields.
+		// The GALLERY image family is excluded too (owner decision
+		// 2026-09-05, #68988): a variation ships only its OWN gallery —
+		// empty means empty, never the parent's images. Stores that want
+		// the parent gallery opt in per attribute with the "parent if
+		// empty" output command (code 20). The main `image` /
+		// `feature_image` attributes are NOT listed: their parent-thumbnail
+		// behavior is handled inside ImageResolver and matches the
+		// storefront.
 		static $no_parent_fallback = array(
 			'sale_price',
 			'sale_price_with_tax',
 			'sale_price_sdate',
 			'sale_price_edate',
 			'sale_price_effective_date',
+			'images',
+			'image_1',
+			'image_2',
+			'image_3',
+			'image_4',
+			'image_5',
+			'image_6',
+			'image_7',
+			'image_8',
+			'image_9',
+			'image_10',
 		);
 
 		// A legitimate ZERO is not "empty": V5's fallbacks triggered on
@@ -336,6 +619,23 @@ class AttributeResolver {
 	 * @return mixed Resolved attribute value.
 	 */
 	private function resolve_wc_attribute( \WC_Product $product, string $attr, Config $config, string $merchant_attr = '' ) {
+		/**
+		 * Short-circuit a WooCommerce source attribute before the built-in
+		 * accessor switch (CBT-642 extension seam — Pro engines answer the
+		 * subscription / installment value groups here).
+		 *
+		 * @since 8.0.27
+		 *
+		 * @param mixed       $pre     Null to continue; any other value is returned as-is.
+		 * @param string      $attr    Source attribute name.
+		 * @param \WC_Product $product WooCommerce product.
+		 * @param Config      $config  Feed configuration.
+		 */
+		$pre = apply_filters( 'ctxfeed_pre_resolve_wc_attribute', null, $attr, $product, $config );
+		if ( null !== $pre ) {
+			return $pre;
+		}
+
 		// AD-PROD-004: switch instead of match() for WPCS compatibility.
 		switch ( $attr ) {
 			case 'id':
@@ -352,6 +652,16 @@ class AttributeResolver {
 					$variation_parts = array();
 					foreach ( array_keys( (array) $product->get_attributes() ) as $attr_slug ) {
 						$attr_value = $product->get_attribute( $attr_slug );
+						if ( '' === $attr_value ) {
+							continue;
+						}
+						// Translation plugins (WPML/WCML) translate CUSTOM
+						// (per-product) attribute values only in WooCommerce's
+						// display layer — a translated variation's stored meta
+						// keeps the original language. Mirror
+						// wc_get_formatted_variation() and run each value
+						// through the display filter (BUG-0101 / CBT-592).
+						$attr_value = (string) apply_filters( 'woocommerce_variation_option_name', $attr_value, null, $attr_slug, $product ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- deliberately firing WooCommerce core's display filter so WCML-style handlers run.
 						if ( '' !== $attr_value ) {
 							$variation_parts[] = $attr_value;
 						}
@@ -404,7 +714,12 @@ class AttributeResolver {
 					$parent = ProductMemo::get( (int) $product->get_parent_id() );
 					$title  = $parent instanceof \WC_Product ? $parent->get_name() : '';
 				} else {
-					$title = '';
+					// V5 parity (CBT-663, #69269): a simple/variable product
+					// has no parent, and V5's parent_title() fell back to the
+					// product's OWN title — V8 shipped '' and every mixed
+					// catalog mapping Title ← Parent Title lost its simple
+					// products' titles.
+					$title = (string) $product->get_name();
 				}
 				return apply_filters(
 					'woo_feed_filter_product_parent_title',
@@ -729,6 +1044,16 @@ class AttributeResolver {
 			case 'parent_id':
 				return $product->is_type( 'variation' ) ? (string) $product->get_parent_id() : '';
 
+			// The product's DEFAULT-LANGUAGE counterpart id. This is V5's
+			// `parent_id` attribute semantics restored under an honest name
+			// (#69001 — Meta language-override feeds key on the primary
+			// catalog's ids): the Pro WPML shim answers the V5 filter with
+			// wpml_object_id(default language); Polylang/none leave the
+			// filter unfiltered, so the product's OWN id returns — never
+			// empty.
+			case 'default_language_id':
+				return (string) apply_filters( 'woo_feed_original_post_id', $product->get_id(), $product, $config );
+
 			case 'quantity':
 				return $this->resolve_quantity( $product, $config );
 
@@ -848,75 +1173,10 @@ class AttributeResolver {
 			case 'tax':
 				return $this->tax->resolve( $product, $attr, $config );
 
-			// @implements G-07 — Google installment attributes.
-			// V5 parity: V5 sources these from WC Subscriptions plugin
-			// meta (`_subscription_length`) and the product price. If
-			// those are unavailable (Subscriptions inactive or the store
-			// doesn't use it) we still honor V8's flexible per-product
-			// `_ctxfeed_` meta and the feed-level config default so
-			// customers who configured V8-native values don't regress.
-			// V5 ProductInfo.php:1316-1332.
-			case 'installment_months':
-				// V5 6.6.x (CTX-924): the WC Subscriptions meta read
-				// moved to ctx-compatibility behind this filter. V8's
-				// per-product meta / config default seeds the value for
-				// stores without the plugin.
-				$meta_val = get_post_meta( $product->get_id(), '_ctxfeed_installment_months', true );
-				$native   = ! empty( $meta_val ) ? $meta_val : $config->get( 'installment_months', '' );
-				return apply_filters( 'woo_feed_filter_installment_months', $native, $product, $config );
-
-			case 'installment_amount':
-				// V5 returns the product price outright. Only fall back
-				// to V8's per-product/config override when the product
-				// has no price (rare — usually variable/grouped edge).
-				$price = $product->get_price();
-				if ( '' !== $price && null !== $price ) {
-					return (string) $price;
-				}
-				$meta_val = get_post_meta( $product->get_id(), '_ctxfeed_installment_amount', true );
-				return ! empty( $meta_val ) ? $meta_val : $config->get( 'installment_amount', '' );
-
-			// @implements G-08 — Google subscription_cost attributes.
-			// V5 sources from WC Subscriptions meta / product price:
-			// subscription_period          → `_subscription_period`
-			// subscription_period_length   → `_subscription_period_interval`
-			// (V5's method name is
-			// `subscription_period_interval`;
-			// V8 uses the Google-spec
-			// name `_length` externally
-			// but reads the same V5 meta)
-			// subscription_amount          → product price
-			// V5 ProductInfo.php:1278-1308.
-			case 'subscription_period':
-				// V5 6.6.x (CTX-924): WC Subscriptions read lives in
-				// ctx-compatibility behind the filter now.
-				$meta_val = get_post_meta( $product->get_id(), '_ctxfeed_subscription_period', true );
-				$native   = ! empty( $meta_val ) ? $meta_val : $config->get( 'subscription_period', '' );
-				return apply_filters( 'woo_feed_filter_subscription_period', $native, $product, $config );
-
-			case 'subscription_period_interval':
-				// V5-parity alias: the source-attribute dropdown
-				// (AttributeRegistry::get_subscription_attributes) still exposes
-				// V5's name `subscription_period_interval` for this field, while
-				// the Google merchant attribute is `subscription_period_length`.
-				// Resolve both names identically so a mapping built off either the
-				// legacy source key or the Google output key yields the same value
-				// instead of falling through to MetaResolver (which would read a
-				// non-existent meta and return empty).
-			case 'subscription_period_length':
-				// Compat hook name keeps V5's `_interval` wording even
-				// though the Google-facing attribute is `_length`.
-				$meta_val = get_post_meta( $product->get_id(), '_ctxfeed_subscription_period_length', true );
-				$native   = ! empty( $meta_val ) ? $meta_val : $config->get( 'subscription_period_length', '' );
-				return apply_filters( 'woo_feed_filter_subscription_period_interval', $native, $product, $config );
-
-			case 'subscription_amount':
-				$price = $product->get_price();
-				if ( '' !== $price && null !== $price ) {
-					return (string) $price;
-				}
-				$meta_val = get_post_meta( $product->get_id(), '_ctxfeed_subscription_amount', true );
-				return ! empty( $meta_val ) ? $meta_val : $config->get( 'subscription_amount', '' );
+			// @implements G-07 / G-08 — Google installment_* and subscription_*
+			// values are Pro picker groups: resolved by the Pro
+			// SubscriptionValues engine through ctxfeed_pre_resolve_wc_attribute
+			// (CBT-652); without it they fall through to the meta resolver.
 
 			// @implements S-05 — Excluded/included destination.
 			case 'excluded_destination':
@@ -1125,9 +1385,9 @@ class AttributeResolver {
 					return $this->wp_option->resolve( $product, $attr, $config );
 				}
 
-				// Attribute mapping (wp_attr_mapping_* prefix).
-				if ( $this->attr_mapping->is_attribute_mapping( $attr ) ) {
-					return $this->attr_mapping->resolve( $product, $attr, $config );
+				// Attribute mapping (wp_attr_mapping_* prefix) — Pro engine.
+				if ( null !== $this->attr_mapping && $this->attr_mapping->handles( $attr ) ) {
+					return $this->attr_mapping->resolve( $product, $attr, $config, $merchant_attr );
 				}
 
 				// Category mapping (wf_cmapping_* prefix). V5 dispatched
@@ -1150,18 +1410,23 @@ class AttributeResolver {
 				// the merchant attribute so V5's woo_feed_after_dynamic_
 				// attribute_value hook receives the channel field name as
 				// arg #4 (V5 line 288 signature). PROD-FRD-10.5.
-				if ( $this->dynamic_attr->is_dynamic_attribute( $attr ) ) {
+				if ( null !== $this->dynamic_attr && $this->dynamic_attr->handles( $attr ) ) {
 					return $this->dynamic_attr->resolve( $product, $attr, $config, $merchant_attr );
 				}
 
-				// ACF fields (the `acf_fields_` dropdown prefix) resolve through
-				// the custom-field resolver — which strips the prefix and calls
-				// get_field() — regardless of the mapping type the UI saved
-				// ('attribute' or 'custom_field'). Without this they fell through
-				// to bare get_post_meta( 'acf_fields_…' ) and shipped empty.
-				if ( 0 === strpos( $attr, 'acf_fields_' ) ) {
-					return $this->custom_field->resolve( $product, $attr, $config );
+				// Registered prefix engines (ctxfeed_attribute_prefix_resolvers),
+				// then the known Pro prefixes' graceful '' when nothing claims
+				// them (CBT-642).
+				$prefixed = $this->resolve_prefixed( $product, $attr, $config, $merchant_attr );
+				if ( null !== $prefixed ) {
+					return $prefixed;
 				}
+
+				// The custom-field plugin prefixes (acf_fields_ / toolset_fields_)
+				// are Pro picker groups: their resolution is the Pro
+				// CustomFieldPrefixResolver engine (CBT-652), registered
+				// through ctxfeed_attribute_prefix_resolvers and consulted by
+				// resolve_prefixed() above; unclaimed they resolve to ''.
 
 				// V5-compat custom-field identifier keys (woo_feed_* prefix).
 				// These are admin-saved meta from V5\CustomFields\InputCustomFiled
@@ -1200,6 +1465,116 @@ class AttributeResolver {
 	}
 
 	/**
+	 * Let extensions narrow a variable parent's attribute option list.
+	 *
+	 * Builds the parent's options in WooCommerce's own order — the same list
+	 * `get_attribute()` joined — as `{ name, slug }` items and passes them
+	 * through `ctxfeed_variable_parent_attribute_items`. The joined value is
+	 * rebuilt only when a callback REMOVED items, so an unhooked or no-op
+	 * callback can never change the exported string (CBT-639: the Pro stock
+	 * filters keep only the options that still have a sellable variation).
+	 *
+	 * @since 8.0.29
+	 *
+	 * @param \WC_Product $parent_product Variable parent product.
+	 * @param string      $attr_name Bare attribute name (no wf_attr_ / pa_ prefix).
+	 * @param string      $value     Value from get_attribute().
+	 * @param Config      $config    Feed configuration.
+	 * @return string
+	 */
+	private function variable_parent_value( \WC_Product $parent_product, string $attr_name, string $value, Config $config ): string {
+		if ( ! has_filter( 'ctxfeed_variable_parent_attribute_items' ) ) {
+			return $value;
+		}
+
+		$attributes = $parent_product->get_attributes();
+		$key        = sanitize_title( $attr_name );
+		$attribute  = $attributes[ $key ] ?? ( $attributes[ 'pa_' . $key ] ?? null );
+		if ( ! $attribute instanceof \WC_Product_Attribute ) {
+			return $value;
+		}
+
+		$items = array();
+		if ( $attribute->is_taxonomy() ) {
+			$terms = wc_get_product_terms( $parent_product->get_id(), $attribute->get_name(), array( 'fields' => 'all' ) );
+			foreach ( (array) $terms as $term ) {
+				if ( $term instanceof \WP_Term ) {
+					$items[] = array(
+						'name' => $term->name,
+						'slug' => $term->slug,
+					);
+				}
+			}
+		} else {
+			foreach ( $attribute->get_options() as $option ) {
+				$items[] = array(
+					'name' => (string) $option,
+					'slug' => sanitize_title( (string) $option ),
+				);
+			}
+		}
+
+		$kept = self::filter_parent_items( $items, $parent_product, $attribute->get_name(), $config );
+		if ( null === $kept ) {
+			return $value;
+		}
+
+		// Join exactly as get_attribute() does: ', ' for global attributes,
+		// WooCommerce's text-attribute delimiter (' | ') for custom ones.
+		return $attribute->is_taxonomy() || ! function_exists( 'wc_implode_text_attributes' )
+			? implode( ', ', $kept )
+			: wc_implode_text_attributes( $kept );
+	}
+
+	/**
+	 * Run the `ctxfeed_variable_parent_attribute_items` filter.
+	 *
+	 * Shared by the product-attribute path here and the taxonomy path in
+	 * TaxonomyResolver so both mean the same thing.
+	 *
+	 * @since 8.0.29
+	 *
+	 * @param array       $items     Ordered `{ name, slug }` option items.
+	 * @param \WC_Product $parent_product Variable parent product.
+	 * @param string      $attribute Attribute name as WooCommerce stores it (`pa_size`, `size`).
+	 * @param Config      $config    Feed configuration.
+	 * @return string[]|null Names of the kept items, or null when nothing was removed.
+	 */
+	public static function filter_parent_items( array $items, \WC_Product $parent_product, string $attribute, Config $config ): ?array {
+		if ( empty( $items ) || ! has_filter( 'ctxfeed_variable_parent_attribute_items' ) ) {
+			return null;
+		}
+
+		/**
+		 * Filter a variable parent's attribute options before they are joined.
+		 *
+		 * Return the items to keep, in order. Removing nothing leaves the
+		 * exported value untouched. Used by CTX Feed Pro to drop options
+		 * whose variations are out of stock when the feed removes
+		 * out-of-stock products (CBT-639).
+		 *
+		 * @since 8.0.29
+		 *
+		 * @param array       $items     `{ name, slug }` items in export order.
+		 * @param \WC_Product $parent_product Variable parent product.
+		 * @param string      $attribute Attribute name (`pa_size` or a custom attribute name).
+		 * @param Config      $config    Feed configuration.
+		 */
+		$kept = apply_filters( 'ctxfeed_variable_parent_attribute_items', $items, $parent_product, $attribute, $config );
+		if ( ! is_array( $kept ) || count( $kept ) >= count( $items ) ) {
+			return null;
+		}
+
+		$names = array();
+		foreach ( $kept as $item ) {
+			if ( is_array( $item ) && isset( $item['name'] ) ) {
+				$names[] = (string) $item['name'];
+			}
+		}
+		return $names;
+	}
+
+	/**
 	 * Resolve WooCommerce product attribute (wf_attr_* prefix).
 	 *
 	 * Handles both global attributes (taxonomy-based, e.g., pa_color, pa_size)
@@ -1234,11 +1609,32 @@ class AttributeResolver {
 		// WC's get_attribute() handles both global (taxonomy) and product-level attributes.
 		$value = $product->get_attribute( $attr_name );
 
+		// A variable parent's value lists every option of the attribute; the
+		// Pro stock filters may narrow it to the options that still have a
+		// sellable variation (CBT-639).
+		if ( '' !== $value && $product->is_type( 'variable' ) ) {
+			$value = $this->variable_parent_value( $product, $attr_name, $value, $config );
+		}
+
+		// Same display-translation seam as the variation-title path (BUG-0101 /
+		// CBT-592): a variation's CUSTOM attribute meta keeps the original
+		// language — WPML/WCML translate it only via WooCommerce's display
+		// filter. This also covers Attribute Mapping and Dynamic Attribute
+		// references, which resolve wf_attr_* through this method. The parent
+		// fallback below stays raw: that value is the parent's product-level
+		// attribute list, not a variation option.
+		if ( '' !== $value && $product->is_type( 'variation' ) ) {
+			$value = (string) apply_filters( 'woocommerce_variation_option_name', $value, null, $attr_name, $product ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- deliberately firing WooCommerce core's display filter so WCML-style handlers run.
+		}
+
 		// Variation fallback: try parent product if variation has empty value.
 		if ( '' === $value && $product->is_type( 'variation' ) ) {
 			$parent = ProductMemo::get( (int) $product->get_parent_id() );
 			if ( $parent instanceof \WC_Product ) {
 				$value = $parent->get_attribute( $attr_name );
+				if ( '' !== $value && $parent->is_type( 'variable' ) ) {
+					$value = $this->variable_parent_value( $parent, $attr_name, $value, $config );
+				}
 			}
 		}
 

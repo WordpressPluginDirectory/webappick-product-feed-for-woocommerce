@@ -156,19 +156,22 @@ class ProductEndpoint extends RestController {
 				'callback'            => array( $this, 'preview_products' ),
 				'permission_callback' => array( $this, 'permission_check' ),
 				'args'                => array(
+					// Declared bounds instead of closures: same rejection,
+					// discoverable over OPTIONS (CBT-588).
 					'per_page' => array(
+						'type'              => 'integer',
+						'minimum'           => 1,
+						'maximum'           => 200,
 						'default'           => 10,
+						'validate_callback' => 'rest_validate_request_arg',
 						'sanitize_callback' => 'absint',
-						'validate_callback' => function ( $value ) {
-							return $value >= 1 && $value <= 200;
-						},
 					),
 					'page'     => array(
+						'type'              => 'integer',
+						'minimum'           => 1,
 						'default'           => 1,
+						'validate_callback' => 'rest_validate_request_arg',
 						'sanitize_callback' => 'absint',
-						'validate_callback' => function ( $value ) {
-							return $value >= 1;
-						},
 					),
 				),
 			) 
@@ -202,11 +205,11 @@ class ProductEndpoint extends RestController {
 				'permission_callback' => array( $this, 'permission_check' ),
 				'args'                => array(
 					'context' => array(
+						'type'              => 'string',
+						'enum'              => array( 'full', 'basic' ),
 						'default'           => 'full',
+						'validate_callback' => 'rest_validate_request_arg',
 						'sanitize_callback' => 'sanitize_text_field',
-						'validate_callback' => function ( $value ) {
-							return in_array( $value, array( 'full', 'basic' ), true );
-						},
 					),
 				),
 			) 
@@ -226,15 +229,15 @@ class ProductEndpoint extends RestController {
 						'default'           => '',
 						'sanitize_callback' => 'sanitize_text_field',
 					),
+					// 'smart' searches title + SKU + ID in one go; 'paste_ids'
+					// takes a comma-separated ID list; the last four are
+					// legacy values kept for backward compat.
 					'search_type' => array(
+						'type'              => 'string',
+						'enum'              => array( 'smart', 'paste_ids', 'paste_tokens', 'title', 'id', 'sku' ),
 						'default'           => 'smart',
+						'validate_callback' => 'rest_validate_request_arg',
 						'sanitize_callback' => 'sanitize_text_field',
-						'validate_callback' => static function ( $value ) {
-							// 'smart' searches title + SKU + ID in one go.
-							// 'paste_ids' accepts a comma-separated list of IDs.
-							// Legacy values accepted for backward compat.
-							return in_array( $value, array( 'smart', 'paste_ids', 'title', 'id', 'sku' ), true );
-						},
 					),
 					'include'     => array(
 						'default'           => '',
@@ -269,6 +272,17 @@ class ProductEndpoint extends RestController {
 				'callback'            => array( $this, 'get_filter_counts' ),
 				'permission_callback' => array( $this, 'permission_check' ),
 			) 
+		);
+
+		// Store profile — aggregate store-shape summary (no PII).
+		register_rest_route(
+			$this->namespace,
+			'/products/store-profile',
+			array(
+				'methods'             => \WP_REST_Server::READABLE,
+				'callback'            => array( $this, 'get_store_profile' ),
+				'permission_callback' => array( $this, 'permission_check' ),
+			)
 		);
 
 		// Product taxonomies — list WooCommerce product taxonomies with terms.
@@ -566,8 +580,30 @@ class ProductEndpoint extends RestController {
 				);
 			}
 
-			$args['post__in'] = $ids;
-			$args['orderby']  = 'post__in';
+			// Hydrate the SAVED ids directly, never through WP_Query: a
+			// multilingual plugin rewrites post__in to the admin's current
+			// language from pre_get_posts, so a saved default-language id
+			// came back as its translation and the picker could not match
+			// the chip to the stored value (CBT-626 / BUG-0111 for products).
+			$results = array();
+			foreach ( $ids as $product_id ) {
+				$product = wc_get_product( $product_id );
+				if ( ! $product ) {
+					continue;
+				}
+				$results[] = array(
+					'id'    => (int) $product_id,
+					'title' => $product->get_name(),
+					'type'  => $product->get_type(),
+					'sku'   => $product->get_sku(),
+				);
+			}
+			return $this->success(
+				array(
+					'products' => $results,
+					'total'    => count( $results ),
+				)
+			);
 		} else {
 			// Apply the search-type strategy.
 			switch ( $search_type ) {
@@ -590,6 +626,75 @@ class ProductEndpoint extends RestController {
 					}
 					$args['post__in'] = $ids;
 					$args['orderby']  = 'post__in';
+					break;
+
+				// Pasted ID/SKU list (#69026). Rule chain (owner-specified):
+				// any non-numeric token → the WHOLE list resolves by exact
+				// SKU; all-numeric → each token tries post ID first, falling
+				// back to exact SKU when no product owns that ID. Tokens
+				// matching neither are simply absent from the response — the
+				// picker diffs and reports them, so numeric SKUs (EAN/GTIN)
+				// resolve correctly instead of silently selecting whatever
+				// product happens to own that post ID.
+				case 'paste_tokens':
+					$tokens = array_slice(
+						array_values(
+							array_unique(
+								array_filter(
+									array_map( 'trim', explode( ',', $search ) ),
+									'strlen'
+								)
+							)
+						),
+						0,
+						200
+					);
+					if ( empty( $tokens ) ) {
+						return $this->success(
+							array(
+								'products' => array(),
+								'total'    => 0,
+							)
+						);
+					}
+
+					$all_numeric = ! array_filter(
+						$tokens,
+						static function ( $t ) {
+							return ! ctype_digit( $t );
+						}
+					);
+
+					$ids = array();
+					foreach ( $tokens as $token ) {
+						$pid = 0;
+						if ( $all_numeric
+							&& in_array( get_post_type( (int) $token ), array( 'product', 'product_variation' ), true ) ) {
+							$pid = (int) $token;
+						}
+						if ( ! $pid && function_exists( 'wc_get_product_id_by_sku' ) ) {
+							$pid = (int) wc_get_product_id_by_sku( $token );
+						}
+						if ( $pid > 0 ) {
+							$ids[] = $pid;
+						}
+					}
+					$ids = array_values( array_unique( $ids ) );
+
+					if ( empty( $ids ) ) {
+						return $this->success(
+							array(
+								'products' => array(),
+								'total'    => 0,
+							)
+						);
+					}
+					$args['post__in']       = $ids;
+					$args['orderby']        = 'post__in';
+					$args['posts_per_page'] = count( $ids );
+					// Per-variation SKUs are common — a SKU (or variation-ID)
+					// hit must not be dropped by the product-only base type.
+					$args['post_type'] = array( 'product', 'product_variation' );
 					break;
 
 				// Legacy single-mode searches kept for any deep-linked UI state.
@@ -659,6 +764,22 @@ class ProductEndpoint extends RestController {
 					break;
 			}
 		}
+
+		/**
+		 * Filter the Specific-products search query arguments.
+		 *
+		 * Lets a multilingual shim search every language (WPML scopes
+		 * WP_Query to the current language, so a default-language title
+		 * never matched from a translated feed — CBT-626 / BUG-0112) and
+		 * hydrate saved ids that live in another language.
+		 *
+		 * @since 8.0.26
+		 *
+		 * @param array  $args        WP_Query arguments.
+		 * @param string $search_type 'title' | 'sku' | 'id' | 'paste_ids' | 'paste_tokens' | 'smart'.
+		 * @param string $search      Raw search text.
+		 */
+		$args = apply_filters( 'ctxfeed_product_search_query_args', $args, $search_type, $search );
 
 		$query   = new \WP_Query( $args );
 		$results = array();
@@ -846,14 +967,19 @@ class ProductEndpoint extends RestController {
 
 		// 2. Title search.
 		$title_q = new \WP_Query(
-			array(
-				'post_type'      => 'product',
-				'post_status'    => $statuses,
-				's'              => $search,
-				'posts_per_page' => $limit,
-				'fields'         => 'ids',
-				'no_found_rows'  => true,
-			) 
+			apply_filters(
+				'ctxfeed_product_search_query_args',
+				array(
+					'post_type'      => 'product',
+					'post_status'    => $statuses,
+					's'              => $search,
+					'posts_per_page' => $limit,
+					'fields'         => 'ids',
+					'no_found_rows'  => true,
+				),
+				'smart',
+				$search
+			)
 		);
 		foreach ( $title_q->posts as $id ) {
 			$collected[ $id ] = $id;
@@ -865,20 +991,25 @@ class ProductEndpoint extends RestController {
 		// 3. SKU search (only if we still have room and search isn't empty).
 		if ( count( $collected ) < $limit ) {
 			$sku_q = new \WP_Query(
-				array(
-					'post_type'      => 'product',
-					'post_status'    => $statuses,
-					'meta_query'     => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- SKU search requires a meta lookup; capped by $limit with no_found_rows.
-						array(
-							'key'     => '_sku',
-							'value'   => $search,
-							'compare' => 'LIKE',
+				apply_filters(
+					'ctxfeed_product_search_query_args',
+					array(
+						'post_type'      => 'product',
+						'post_status'    => $statuses,
+						'meta_query'     => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- SKU search requires a meta lookup; capped by $limit with no_found_rows.
+							array(
+								'key'     => '_sku',
+								'value'   => $search,
+								'compare' => 'LIKE',
+							),
 						),
+						'posts_per_page' => $limit,
+						'fields'         => 'ids',
+						'no_found_rows'  => true,
 					),
-					'posts_per_page' => $limit,
-					'fields'         => 'ids',
-					'no_found_rows'  => true,
-				) 
+					'smart',
+					$search
+				)
 			);
 			foreach ( $sku_q->posts as $id ) {
 				$collected[ $id ] = $id;
@@ -904,7 +1035,7 @@ class ProductEndpoint extends RestController {
 		$statuses = $this->filter_count_statuses();
 		$in       = "'" . implode( "','", array_map( 'esc_sql', $statuses ) ) . "'";
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
 		$count = $wpdb->get_var(
 			"SELECT COUNT(DISTINCT p.ID)
 			 FROM {$wpdb->posts} p
@@ -934,7 +1065,7 @@ class ProductEndpoint extends RestController {
 		$statuses = $this->filter_count_statuses();
 		$in       = "'" . implode( "','", array_map( 'esc_sql', $statuses ) ) . "'";
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
 		$count = $wpdb->get_var(
 			"SELECT COUNT(*) FROM {$wpdb->posts} p
 			 WHERE p.post_type = 'product'
@@ -971,7 +1102,7 @@ class ProductEndpoint extends RestController {
 		$statuses = $this->filter_count_statuses();
 		$in       = "'" . implode( "','", array_map( 'esc_sql', $statuses ) ) . "'";
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
 		$count = $wpdb->get_var(
 			"SELECT COUNT(*) FROM {$wpdb->posts}
 			 WHERE post_type = 'product'
@@ -1019,7 +1150,7 @@ class ProductEndpoint extends RestController {
 		$statuses = $this->filter_count_statuses();
 		$in       = "'" . implode( "','", array_map( 'esc_sql', $statuses ) ) . "'";
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
 		$count = $wpdb->get_var(
 			$wpdb->prepare(
 				"SELECT COUNT(DISTINCT p.ID) FROM {$wpdb->posts} p
@@ -1049,7 +1180,7 @@ class ProductEndpoint extends RestController {
 		$statuses = $this->filter_count_statuses();
 		$in       = "'" . implode( "','", array_map( 'esc_sql', $statuses ) ) . "'";
 
-		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Aggregate COUNT diagnostic; $in is a fixed post-status list escaped with esc_sql(), and results are cheap enough not to cache.
 		$count = $wpdb->get_var(
 			"SELECT COUNT(*) FROM {$wpdb->posts} p
 			 WHERE p.post_type = 'product'
@@ -1065,6 +1196,133 @@ class ProductEndpoint extends RestController {
 		// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 
 		return (int) $count;
+	}
+
+	/**
+	 * Aggregate store-shape profile for feed configuration.
+	 *
+	 * Counts and ranges an AI (or the admin UI) needs to pick sensible
+	 * channels, filters and mappings without paging through products:
+	 * status/type/stock counts, price range, currency and units, and the
+	 * product taxonomies in play. Deliberately contains NO order, customer
+	 * or other PII data — this endpoint is also exposed as the
+	 * ctxfeed/get-store-profile MCP read ability (owner decision 2026-09-10).
+	 *
+	 * All aggregates go through WP/WC built-ins (wp_count_posts, get_terms,
+	 * WC_Product_Query totals) — no raw product SQL.
+	 *
+	 * @since 8.0.19
+	 *
+	 * @param \WP_REST_Request $request REST request object.
+	 * @return \WP_REST_Response
+	 */
+	public function get_store_profile( \WP_REST_Request $request ): \WP_REST_Response { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.Found, VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable -- $request is required by the REST callback signature.
+		$product_counts   = (array) wp_count_posts( 'product' );
+		$variation_counts = (array) wp_count_posts( 'product_variation' );
+
+		$type_counts = array();
+		$type_terms  = get_terms(
+			array(
+				'taxonomy'   => 'product_type',
+				'hide_empty' => true,
+			)
+		);
+		if ( is_array( $type_terms ) ) {
+			foreach ( $type_terms as $term ) {
+				$type_counts[ $term->slug ] = (int) $term->count;
+			}
+		}
+
+		$stock_counts = array();
+		foreach ( array( 'instock', 'outofstock', 'onbackorder' ) as $stock_status ) {
+			$result                        = wc_get_products(
+				array(
+					'status'       => 'publish',
+					'stock_status' => $stock_status,
+					'limit'        => 1,
+					'paginate'     => true,
+					'return'       => 'ids',
+				)
+			);
+			$stock_counts[ $stock_status ] = is_object( $result ) ? (int) $result->total : 0;
+		}
+
+		$price_range = array(
+			'min' => null,
+			'max' => null,
+		);
+		foreach ( array(
+			'min' => 'ASC',
+			'max' => 'DESC',
+		) as $bound => $order ) {
+			// WC_Product_Query has no price ordering; order on WooCommerce's
+			// canonical `_price` lookup meta instead (WP_Query API, no raw SQL).
+			// phpcs:disable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- One LIMIT-1 keyed meta ordering per bound on an admin/MCP diagnostic endpoint, never on the feed path.
+			$extreme = new \WP_Query(
+				array(
+					'post_type'      => 'product',
+					'post_status'    => 'publish',
+					'posts_per_page' => 1,
+					'fields'         => 'ids',
+					'no_found_rows'  => true,
+					'orderby'        => 'meta_value_num',
+					'meta_key'       => '_price',
+					'order'          => $order,
+					'meta_query'     => array(
+						array(
+							'key'     => '_price',
+							'value'   => '',
+							'compare' => '!=',
+						),
+					),
+				)
+			);
+			// phpcs:enable WordPress.DB.SlowDBQuery.slow_db_query_meta_key, WordPress.DB.SlowDBQuery.slow_db_query_meta_query
+			if ( ! empty( $extreme->posts ) ) {
+				$extreme_product = wc_get_product( (int) $extreme->posts[0] );
+				if ( $extreme_product instanceof \WC_Product && '' !== (string) $extreme_product->get_price() ) {
+					$price_range[ $bound ] = (float) $extreme_product->get_price();
+				}
+			}
+		}
+
+		$taxonomy_counts = array();
+		foreach ( get_object_taxonomies( 'product', 'objects' ) as $slug => $taxonomy ) {
+			$count                    = wp_count_terms( array( 'taxonomy' => $slug ) );
+			$taxonomy_counts[ $slug ] = array(
+				'label' => (string) $taxonomy->label,
+				'terms' => is_wp_error( $count ) ? 0 : (int) $count,
+			);
+		}
+
+		return $this->success(
+			array(
+				'products'   => array(
+					'by_status'  => array(
+						'publish' => (int) ( $product_counts['publish'] ?? 0 ),
+						'draft'   => (int) ( $product_counts['draft'] ?? 0 ),
+						'pending' => (int) ( $product_counts['pending'] ?? 0 ),
+						'private' => (int) ( $product_counts['private'] ?? 0 ),
+					),
+					'by_type'    => $type_counts,
+					'by_stock'   => $stock_counts,
+					'variations' => (int) ( $variation_counts['publish'] ?? 0 ),
+					'on_sale'    => count( wc_get_product_ids_on_sale() ),
+					'featured'   => count( wc_get_featured_product_ids() ),
+				),
+				'pricing'    => array(
+					'currency'           => get_woocommerce_currency(),
+					'price_range'        => $price_range,
+					'prices_include_tax' => wc_prices_include_tax(),
+					'tax_enabled'        => wc_tax_enabled(),
+				),
+				'units'      => array(
+					'weight'    => (string) get_option( 'woocommerce_weight_unit' ),
+					'dimension' => (string) get_option( 'woocommerce_dimension_unit' ),
+				),
+				'taxonomies' => $taxonomy_counts,
+			)
+		);
 	}
 
 	/**
@@ -1084,7 +1342,11 @@ class ProductEndpoint extends RestController {
 		$container         = Container::get_instance();
 		$registry          = $container->resolve( 'product.taxonomy_registry' );
 		$specific_taxonomy = $request->get_param( 'taxonomy' );
-		$hide_empty        = $request->get_param( 'hide_empty' );
+		// Cast, don't trust the route-arg default: requests built outside the
+		// registered REST route (the MCP ability path constructs a bare
+		// WP_REST_Request) carry no arg defaults, and a null here fataled
+		// TaxonomyRegistry's bool-typed parameter.
+		$hide_empty = (bool) $request->get_param( 'hide_empty' );
 
 		// If a specific taxonomy is requested, return just that one.
 		if ( ! empty( $specific_taxonomy ) ) {

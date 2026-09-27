@@ -48,13 +48,20 @@ class FeedEndpoint extends RestController {
 					'methods'             => \WP_REST_Server::READABLE,
 					'callback'            => array( $this, 'get_feeds' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(),
 				),
 				array(
 					'methods'             => \WP_REST_Server::CREATABLE,
 					'callback'            => array( $this, 'create_feed' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					// Top-level body sections declared; the DEEP form shape is
+					// validated by the handler chain (FeedValidator + the
+					// CBT-583/584/585 named 400s) — that chain IS the server
+					// truth, so it is not duplicated here (CBT-588).
+					'args'                => $this->feed_body_args( true ),
 				),
-			) 
+				'schema' => array( $this, 'get_feed_response_schema' ),
+			)
 		);
 
 		// Import feed from .wpf file.
@@ -73,10 +80,34 @@ class FeedEndpoint extends RestController {
 			$this->namespace,
 			'/feeds/bulk',
 			array(
-				'methods'             => \WP_REST_Server::CREATABLE,
-				'callback'            => array( $this, 'bulk_action' ),
-				'permission_callback' => array( $this, 'permission_check' ),
-			) 
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $this, 'bulk_action' ),
+					'permission_callback' => array( $this, 'permission_check' ),
+					// The enum closes a silent hole: the action switch has no
+					// default case, so an unknown action did NOTHING per feed
+					// and still answered success (CBT-588).
+					'args'                => array(
+						'action' => array(
+							'required'          => true,
+							'type'              => 'string',
+							'enum'              => array( 'delete', 'duplicate', 'auto_update_on', 'auto_update_off' ),
+							'validate_callback' => 'rest_validate_request_arg',
+							'sanitize_callback' => 'sanitize_text_field',
+						),
+						'ids'    => array(
+							'required'          => true,
+							'type'              => 'array',
+							'validate_callback' => 'rest_validate_request_arg',
+							'description'       => __( 'Feed ids/slugs the action applies to.', 'woo-feed' ),
+						),
+						'names'  => array(
+							'type'        => 'array',
+							'description' => __( 'Optional display names aligned with ids (duplicate uses them for the copies).', 'woo-feed' ),
+						),
+					),
+				),
+			)
 		);
 
 		// Feed templates / channel list — registered BEFORE {id} route
@@ -102,6 +133,8 @@ class FeedEndpoint extends RestController {
 				'args'                => array(
 					'template' => array(
 						'required'          => true,
+						'type'              => 'string',
+						'validate_callback' => array( $this, 'validate_non_blank_string' ),
 						'sanitize_callback' => 'sanitize_text_field',
 						'description'       => __( 'Template/merchant key (e.g., google, facebook).', 'woo-feed' ),
 					),
@@ -117,18 +150,24 @@ class FeedEndpoint extends RestController {
 					'methods'             => \WP_REST_Server::READABLE,
 					'callback'            => array( $this, 'get_feed' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(),
 				),
 				array(
 					'methods'             => \WP_REST_Server::EDITABLE,
 					'callback'            => array( $this, 'update_feed' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					// makeFeedForm optional: the light mode toggles auto_update
+					// without a form body (CBT-588).
+					'args'                => $this->feed_body_args( false ),
 				),
 				array(
 					'methods'             => \WP_REST_Server::DELETABLE,
 					'callback'            => array( $this, 'delete_feed' ),
 					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(),
 				),
-			) 
+				'schema' => array( $this, 'get_feed_response_schema' ),
+			)
 		);
 
 		register_rest_route(
@@ -139,6 +178,28 @@ class FeedEndpoint extends RestController {
 				'callback'            => array( $this, 'generate_feed' ),
 				'permission_callback' => array( $this, 'permission_check' ),
 			) 
+		);
+
+		// Per-product feed debugger — walks one product through the feed's
+		// real pipeline stage by stage (query, filters, resolve, transform,
+		// mapping) and reports each verdict. Backs ctxfeed/debug-feed-product.
+		register_rest_route(
+			$this->namespace,
+			'/feeds/(?P<id>[a-zA-Z0-9_-]+)/debug-product',
+			array(
+				'methods'             => \WP_REST_Server::READABLE,
+				'callback'            => array( $this, 'debug_feed_product' ),
+				'permission_callback' => array( $this, 'permission_check' ),
+				'args'                => array(
+					'product_id' => array(
+						'required'          => true,
+						'type'              => 'integer',
+						'minimum'           => 1,
+						'validate_callback' => 'rest_validate_request_arg',
+						'sanitize_callback' => 'absint',
+					),
+				),
+			)
 		);
 
 		register_rest_route(
@@ -195,9 +256,13 @@ class FeedEndpoint extends RestController {
 			$this->namespace,
 			'/feeds/(?P<id>[a-zA-Z0-9_-]+)/status',
 			array(
-				'methods'             => \WP_REST_Server::READABLE,
-				'callback'            => array( $this, 'get_feed_status' ),
-				'permission_callback' => array( $this, 'permission_check' ),
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $this, 'get_feed_status' ),
+					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(),
+				),
+				'schema' => array( $this, 'get_feed_status_response_schema' ),
 			)
 		);
 
@@ -212,6 +277,124 @@ class FeedEndpoint extends RestController {
 				'callback'            => array( $this, 'run_feed_batches' ),
 				'permission_callback' => array( $this, 'permission_check' ),
 			)
+		);
+	}
+
+	/**
+	 * Declared top-level body sections for feed create/update (CBT-588).
+	 *
+	 * Sections beyond makeFeedForm stay type-loose on purpose: the handler
+	 * chain normalizes several legacy shapes per section (V5 parity), and
+	 * the deep validation with named 400s lives there — declaring hard types
+	 * here would reject shapes the engine deliberately accepts.
+	 *
+	 * @since 8.0.22
+	 *
+	 * @param bool $form_required Whether makeFeedForm is required (create).
+	 * @return array
+	 */
+	private function feed_body_args( bool $form_required ): array {
+		$args = array(
+			'makeFeedForm'       => array(
+				'type'        => 'object',
+				'description' => __( 'The feed form. template, fileName and fileType are required inside; the server names anything missing or invalid.', 'woo-feed' ),
+			),
+			'feedRules'          => array(
+				'description' => __( 'Attribute rows (mattribute, type, attribute/pattern, prefix, suffix, output_type, limit).', 'woo-feed' ),
+			),
+			'filterOptions'      => array( 'description' => __( 'Stock/visibility/empty-value filter toggles.', 'woo-feed' ) ),
+			'postStatus'         => array( 'description' => __( 'Included post statuses.', 'woo-feed' ) ),
+			'categories'         => array( 'description' => __( 'Category include/exclude list.', 'woo-feed' ) ),
+			'productIds'         => array( 'description' => __( 'Product include/exclude list.', 'woo-feed' ) ),
+			'filterMode'         => array( 'description' => __( 'include/exclude mode per list filter.', 'woo-feed' ) ),
+			'numberFormat'       => array( 'description' => __( 'decimals, decimal_separator, thousand_separator.', 'woo-feed' ) ),
+			'campaignParameters' => array( 'description' => __( 'UTM parameters.', 'woo-feed' ) ),
+			'stringReplace'      => array(
+				'description' => __( 'String Replace rows: {subject, search, replace, mode} with mode one of "", "literal", "regex" — unknown keys or an invalid mode 400 with the row named.', 'woo-feed' ),
+			),
+			'shippingCountry'    => array( 'description' => __( "'feed', 'all', or a country code.", 'woo-feed' ) ),
+			'taxCountry'         => array( 'description' => __( "'feed' or a country code.", 'woo-feed' ) ),
+			'compositePrice'     => array( 'description' => __( "Composite product price (Pro): 'parent_product_price' (base price) or 'all_product_price' (base + components). Other values clear the setting.", 'woo-feed' ) ),
+			'ftp'                => array( 'description' => __( 'FTP/SFTP upload settings.', 'woo-feed' ) ),
+			'advancedFilter'     => array( 'description' => __( 'Advanced filter rows and _filter_groups.', 'woo-feed' ) ),
+			'autoGenerate'       => array(
+				'description' => __( 'Boolean-ish; false saves without scheduling generation. Default true — an invalid feed then saves with "generation skipped" warnings and records status invalid with reasons.', 'woo-feed' ),
+			),
+		);
+
+		if ( $form_required ) {
+			$args['makeFeedForm']['required']          = true;
+			$args['makeFeedForm']['validate_callback'] = 'rest_validate_request_arg';
+		} else {
+			$args['auto_update'] = array(
+				'description' => __( 'Light mode: toggle auto update without sending the form.', 'woo-feed' ),
+			);
+		}
+
+		return $args;
+	}
+
+	/**
+	 * Response schema for the feed CRUD routes (CBT-588).
+	 *
+	 * @since 8.0.22
+	 *
+	 * @return array
+	 */
+	public function get_feed_response_schema(): array {
+		return array(
+			'$schema'    => 'http://json-schema.org/draft-04/schema#',
+			'title'      => 'ctxfeed-feeds',
+			'type'       => 'object',
+			'properties' => array(
+				'success' => array( 'type' => 'boolean' ),
+				'data'    => array(
+					'type'        => 'object',
+					'description' => __( 'Create/update responses carry warnings[] (user-facing strings, e.g. "Saved, but automatic generation was skipped …") alongside the saved feed.', 'woo-feed' ),
+					'properties'  => array(
+						'warnings' => array(
+							'type'  => 'array',
+							'items' => array( 'type' => 'string' ),
+						),
+					),
+				),
+			),
+		);
+	}
+
+	/**
+	 * Response schema for GET /feeds/{id}/status (CBT-588).
+	 *
+	 * @since 8.0.22
+	 *
+	 * @return array
+	 */
+	public function get_feed_status_response_schema(): array {
+		return array(
+			'$schema'    => 'http://json-schema.org/draft-04/schema#',
+			'title'      => 'ctxfeed-feed-status',
+			'type'       => 'object',
+			'properties' => array(
+				'success' => array( 'type' => 'boolean' ),
+				'data'    => array(
+					'type'       => 'object',
+					'properties' => array(
+						'status'   => array(
+							'type'        => 'string',
+							'description' => __( "Includes 'invalid' — the feed cannot generate; invalid_reasons says why (CBT-583).", 'woo-feed' ),
+						),
+						'progress' => array(
+							'type'       => 'object',
+							'properties' => array(
+								'invalid_reasons' => array(
+									'type'  => 'array',
+									'items' => array( 'type' => 'string' ),
+								),
+							),
+						),
+					),
+				),
+			),
 		);
 	}
 
@@ -234,6 +417,17 @@ class FeedEndpoint extends RestController {
 		global $wpdb;
 
 		$channel_filter = $request->get_param( 'channel' );
+
+		// Opportunistic self-heal (CBT-569, hourly-throttled): re-register
+		// any enabled feed whose recurring action silently disappeared, so
+		// simply OPENING Manage Feeds repairs a stalled schedule — and the
+		// next_run values below then reflect live Action Scheduler truth.
+		$scheduler = null;
+		$container = \CTXFeed\V8\Core\Container::get_instance();
+		if ( $container->has( 'feed.scheduler' ) ) {
+			$scheduler = $container->resolve( 'feed.scheduler' );
+			$scheduler->heal_recurring_schedules();
+		}
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Feed configs live in wp_options under the wf_feed_ prefix (shared with V5 — no migration). get_option() cannot enumerate by prefix and these rows are deliberately non-autoloaded, so a direct prepared query is the only way to list them. Admin REST route only; never on the feed-generation path.
 		$rows = $wpdb->get_results(
@@ -269,6 +463,17 @@ class FeedEndpoint extends RestController {
 				continue;
 			}
 
+			// Next auto-run instant from Action Scheduler itself — null for
+			// auto-off feeds, and (post-heal above) null for an enabled feed
+			// only when re-registration genuinely failed, which the UI
+			// surfaces instead of showing the configured interval as if it
+			// were live (CBT-569).
+			$next_run = null;
+			if ( $scheduler && $this->is_auto_update_on( $config ) ) {
+				$next_ts  = $scheduler->next_scheduled_run( $feed_name );
+				$next_run = ( null === $next_ts ) ? null : gmdate( 'c', $next_ts );
+			}
+
 			$feeds[] = array(
 				'id'          => $row['option_id'],
 				'option_name' => $option_name,
@@ -285,6 +490,7 @@ class FeedEndpoint extends RestController {
 				// A run started elsewhere (cron, another tab, another admin):
 				// the list picks it up and shows the live console for it.
 				'generating'  => $this->is_generating( $feed_name ),
+				'next_run'    => $next_run,
 			);
 		}
 
@@ -362,6 +568,13 @@ class FeedEndpoint extends RestController {
 			return $this->error( __( 'Feed not found.', 'woo-feed' ), 404 );
 		}
 
+		// Feeds saved on 8.0.16–8.0.23 carry entity-encoded Text values
+		// (CBT-607); hand the editor the characters the customer typed so
+		// the field reads correctly and the next save stores it clean.
+		if ( isset( $config['feedrules']['default'] ) && is_array( $config['feedrules']['default'] ) ) {
+			$config['feedrules']['default'] = array_map( array( Sanitizer::class, 'restore_text' ), $config['feedrules']['default'] );
+		}
+
 		return $this->success( $config );
 	}
 
@@ -396,6 +609,7 @@ class FeedEndpoint extends RestController {
 		$string_replace      = $request->get_param( 'stringReplace' );
 		$shipping_country    = $request->get_param( 'shippingCountry' );
 		$tax_country         = $request->get_param( 'taxCountry' );
+		$composite_price     = $request->get_param( 'compositePrice' );
 		$ftp                 = $request->get_param( 'ftp' );
 		$advanced_filter     = $request->get_param( 'advancedFilter' );
 
@@ -415,6 +629,30 @@ class FeedEndpoint extends RestController {
 			return $this->error( __( 'Feed country is required. It sets the market whose tax rate and shipping zones the feed uses — tax-inclusive prices resolve to zero tax without it.', 'woo-feed' ), 400 );
 		}
 
+		// Every mapping row must be complete before it can persist —
+		// half-empty rows rendered invalid XML (BUG-0083).
+		if ( is_array( $rules ) ) {
+			$ctx_rows_error = $this->incomplete_rows_message( $rules );
+			if ( '' !== $ctx_rows_error ) {
+				return $this->error( $ctx_rows_error, 400 );
+			}
+		}
+
+		// String Replace rows must use the recognized shape (CBT-585 /
+		// BUG-0087): a wrong-but-plausible key set used to be silently
+		// dropped at save, leaving the merchant believing the rule was live.
+		if ( is_array( $string_replace ) ) {
+			$ctx_sr_error = $this->string_replace_shape_error( $string_replace );
+			if ( '' !== $ctx_sr_error ) {
+				return $this->error( $ctx_sr_error, 400 );
+			}
+		}
+
+		$ctx_interval_error = $this->minute_interval_gate_error( $form );
+		if ( '' !== $ctx_interval_error ) {
+			return $this->error( $ctx_interval_error, 403 );
+		}
+
 		// Convert React row-based rules to parallel-array format.
 		$feedrules = $this->build_feedrules_from_form(
 			$form,
@@ -431,7 +669,8 @@ class FeedEndpoint extends RestController {
 			is_string( $tax_country ) ? $tax_country : '',
 			is_array( $ftp ) ? $ftp : array(),
 			array(), // No existing feedrules on create.
-			is_array( $advanced_filter ) ? $advanced_filter : array()
+			is_array( $advanced_filter ) ? $advanced_filter : array(),
+			is_string( $composite_price ) ? $composite_price : ''
 		);
 
 		// Generate unique slug from file name.
@@ -466,8 +705,11 @@ class FeedEndpoint extends RestController {
 		// autoGenerate=false and drives generation itself from the feed list
 		// (with a progress bar), so the save must not ALSO start a background
 		// run — a double run double-schedules and clobbers a large feed's batches.
+		$generation_warnings = array();
 		if ( $this->request_wants_auto_generate( $request ) ) {
-			$this->maybe_auto_generate( $slug, 'create' );
+			$generation_warnings = $this->generation_skip_warnings(
+				$this->maybe_auto_generate( $slug, 'create' )
+			);
 		}
 
 		$feed = $this->find_feed( $slug );
@@ -476,7 +718,7 @@ class FeedEndpoint extends RestController {
 			array(
 				'success'  => true,
 				'data'     => $feed,
-				'warnings' => $this->save_warnings(),
+				'warnings' => array_merge( $this->save_warnings(), $generation_warnings ),
 			),
 			201
 		);
@@ -520,8 +762,9 @@ class FeedEndpoint extends RestController {
 			// Reconcile the Action Scheduler recurring entry with the new
 			// status. Without this, the toggle was previously a UI-only
 			// flag — wp_options changed but no recurring action was ever
-			// registered (or cancelled).
-			$this->sync_feed_schedule( $option_name, $config );
+			// registered (or cancelled). Toggling OFF also purges the feed's
+			// queued/in-flight runs (see sync_feed_schedule).
+			$this->sync_feed_schedule( $option_name, $config, ! $auto_update );
 
 			return $this->success(
 				array(
@@ -544,6 +787,7 @@ class FeedEndpoint extends RestController {
 		$string_replace      = $request->get_param( 'stringReplace' );
 		$shipping_country    = $request->get_param( 'shippingCountry' );
 		$tax_country         = $request->get_param( 'taxCountry' );
+		$composite_price     = $request->get_param( 'compositePrice' );
 		$ftp                 = $request->get_param( 'ftp' );
 		$advanced_filter     = $request->get_param( 'advancedFilter' );
 
@@ -556,6 +800,30 @@ class FeedEndpoint extends RestController {
 		// feed must set it before the config can be re-saved.
 		if ( empty( $form['country'] ) ) {
 			return $this->error( __( 'Feed country is required. It sets the market whose tax rate and shipping zones the feed uses — tax-inclusive prices resolve to zero tax without it.', 'woo-feed' ), 400 );
+		}
+
+		// Same per-row completeness rule as create (BUG-0083) — the MCP
+		// update-feed ability lands here too.
+		if ( is_array( $rules ) ) {
+			$ctx_rows_error = $this->incomplete_rows_message( $rules );
+			if ( '' !== $ctx_rows_error ) {
+				return $this->error( $ctx_rows_error, 400 );
+			}
+		}
+
+		// String Replace rows must use the recognized shape (CBT-585 /
+		// BUG-0087): a wrong-but-plausible key set used to be silently
+		// dropped at save, leaving the merchant believing the rule was live.
+		if ( is_array( $string_replace ) ) {
+			$ctx_sr_error = $this->string_replace_shape_error( $string_replace );
+			if ( '' !== $ctx_sr_error ) {
+				return $this->error( $ctx_sr_error, 400 );
+			}
+		}
+
+		$ctx_interval_error = $this->minute_interval_gate_error( is_array( $form ) ? $form : array() );
+		if ( '' !== $ctx_interval_error ) {
+			return $this->error( $ctx_interval_error, 403 );
 		}
 
 		$feed_slug = str_replace( 'wf_feed_', '', $option_name );
@@ -582,7 +850,8 @@ class FeedEndpoint extends RestController {
 			is_string( $tax_country ) ? $tax_country : '',
 			is_array( $ftp ) ? $ftp : array(),
 			$existing_feedrules,
-			is_array( $advanced_filter ) ? $advanced_filter : array()
+			is_array( $advanced_filter ) ? $advanced_filter : array(),
+			is_string( $composite_price ) ? $composite_price : ''
 		);
 
 		// Direct update — V8 handles its own persistence.
@@ -599,8 +868,11 @@ class FeedEndpoint extends RestController {
 
 		// Rebuild the feed now that its configuration changed (V5 parity) —
 		// unless the caller opts out (autoGenerate=false; see create_feed).
+		$generation_warnings = array();
 		if ( $this->request_wants_auto_generate( $request ) ) {
-			$this->maybe_auto_generate( $feed_slug, 'update' );
+			$generation_warnings = $this->generation_skip_warnings(
+				$this->maybe_auto_generate( $feed_slug, 'update' )
+			);
 		}
 
 		$feed = $this->find_feed( $id );
@@ -609,7 +881,7 @@ class FeedEndpoint extends RestController {
 			array(
 				'success'  => true,
 				'data'     => $feed,
-				'warnings' => $this->save_warnings(),
+				'warnings' => array_merge( $this->save_warnings(), $generation_warnings ),
 			),
 			200
 		);
@@ -728,6 +1000,10 @@ class FeedEndpoint extends RestController {
 			$validator  = $container->resolve( 'feed.validator' );
 			$validation = $validator->validate( $config );
 			if ( empty( $validation['valid'] ) ) {
+				// CBT-583: correct the status surface too — without this, a
+				// stale 'completed' from a run before the config broke kept
+				// being reported by get-feed-status after this 422.
+				$this->mark_feed_invalid( $feed_name, array_map( 'strval', (array) $validation['errors'] ) );
 				return new \WP_REST_Response(
 					array(
 						'success' => false,
@@ -1198,9 +1474,14 @@ class FeedEndpoint extends RestController {
 		$log_file_path = $log_dir . sanitize_file_name( $feed_slug ) . '.log';
 
 		// 2. Fallback: glob scan for {slug}-*.log (legacy dated log format).
+		// sanitize_file_name like the primary path above: the slug comes from
+		// an existing wf_feed_ option so it should already be clean, but a
+		// path-building input never goes into a filesystem pattern unsanitised
+		// (defence in depth — the V5-era log download fell to exactly this
+		// class of traversal).
 		if ( empty( $log_file_path ) || ! file_exists( $log_file_path ) ) {
 			if ( is_dir( $log_dir ) ) {
-				$pattern = $log_dir . $feed_slug . '-*.log';
+				$pattern = $log_dir . sanitize_file_name( $feed_slug ) . '-*.log';
 				$files   = glob( $pattern );
 				if ( ! empty( $files ) ) {
 					usort(
@@ -1568,9 +1849,9 @@ class FeedEndpoint extends RestController {
 							$config['status'] = ( 'auto_update_on' === $action ) ? 1 : 0;
 							$results[]        = update_option( $feed_data['option_name'], $config, false );
 
-							// Reconcile recurring action — on registers,
-							// off cancels.
-							$this->sync_feed_schedule( $feed_data['option_name'], $config );
+							// Reconcile recurring action — on registers, off
+							// cancels AND purges the feed's queued runs.
+							$this->sync_feed_schedule( $feed_data['option_name'], $config, 'auto_update_off' === $action );
 						}
 					}
 					break;
@@ -1618,9 +1899,10 @@ class FeedEndpoint extends RestController {
 	 *
 	 * @param string $feed_name Feed slug.
 	 * @param string $context   'create' | 'update' | 'duplicate'.
-	 * @return void
+	 * @return string[] Validation reasons that blocked generation (CBT-583);
+	 *                  empty when generation was scheduled or disabled.
 	 */
-	private function maybe_auto_generate( string $feed_name, string $context ): void {
+	private function maybe_auto_generate( string $feed_name, string $context ): array {
 		/**
 		 * Filter whether saving a feed auto-starts a one-time generation.
 		 *
@@ -1631,8 +1913,10 @@ class FeedEndpoint extends RestController {
 		 * @param string $context   create|update|duplicate.
 		 */
 		if ( apply_filters( 'ctxfeed_feed_auto_generate_on_save', true, $feed_name, $context ) ) {
-			$this->schedule_generation_for( $feed_name );
+			return $this->schedule_generation_for( $feed_name );
 		}
+
+		return array();
 	}
 
 	/**
@@ -1641,21 +1925,41 @@ class FeedEndpoint extends RestController {
 	 * Best-effort variant of generate_feed_v8()'s scheduling used inside
 	 * bulk loops — one feed's scheduling failure must not abort the rest.
 	 *
+	 * CBT-583 (BUG-0084/BUG-0089): this path used to skip FeedValidator
+	 * entirely, so an API-created feed with zero mappings (or the CT2
+	 * family's unsettable-via-API markup) auto-generated into a garbage
+	 * file that reported status "completed". It now runs the SAME
+	 * validator gate generate_feed_v8() runs: an invalid config schedules
+	 * nothing, its status is recorded as 'invalid' with the reasons (so
+	 * ctxfeed-get-feed-status reflects reality), and the reasons are
+	 * returned for the create/update response's warnings array.
+	 *
 	 * @since 8.0.0
 	 *
 	 * @param string $feed_name Feed slug identifier.
-	 * @return void
+	 * @return string[] Validation reasons that BLOCKED generation (empty
+	 *                  when generation was scheduled, auto-generate is
+	 *                  unavailable, or a non-validation failure occurred).
 	 */
-	private function schedule_generation_for( string $feed_name ): void {
+	private function schedule_generation_for( string $feed_name ): array {
 		try {
 			$container = \CTXFeed\V8\Core\Container::get_instance();
 			if ( ! $container->has( 'feed.scheduler' ) ) {
-				return;
+				return array();
 			}
 
 			$config = \CTXFeed\V8\Core\Config::from_feed_name( $feed_name );
 			if ( ! $config ) {
-				return;
+				return array();
+			}
+
+			if ( $container->has( 'feed.validator' ) ) {
+				$validation = $container->resolve( 'feed.validator' )->validate( $config );
+				if ( empty( $validation['valid'] ) ) {
+					$reasons = array_map( 'strval', (array) ( $validation['errors'] ?? array() ) );
+					$this->mark_feed_invalid( $feed_name, $reasons );
+					return $reasons;
+				}
 			}
 
 			$container->resolve( 'feed.scheduler' )->schedule_generation( $feed_name, $config );
@@ -1663,6 +1967,66 @@ class FeedEndpoint extends RestController {
 			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Only record of a swallowed scheduling failure inside the bulk loop; the feed still exists and can be regenerated manually.
 			error_log( '[CTXFeed V8] bulk duplicate generation scheduling failed for ' . $feed_name . ': ' . $e->getMessage() );
 		}
+
+		return array();
+	}
+
+	/**
+	 * Record that a feed's configuration failed validation (CBT-583).
+	 *
+	 * Overwrites any prior progress (including a stale 'completed' from a
+	 * run before the config was known to be broken) with status 'invalid'
+	 * and the human-readable reasons, so every status surface tells the
+	 * truth until the config is fixed and a new run starts.
+	 *
+	 * @since 8.0.21
+	 *
+	 * @param string   $feed_name Feed slug identifier.
+	 * @param string[] $reasons   Validator error strings.
+	 * @return void
+	 */
+	private function mark_feed_invalid( string $feed_name, array $reasons ): void {
+		try {
+			$container = \CTXFeed\V8\Core\Container::get_instance();
+			if ( ! $container->has( 'feed.manager' ) ) {
+				return;
+			}
+			$container->resolve( 'feed.manager' )->update_progress(
+				$feed_name,
+				array(
+					'current'         => 0,
+					'total'           => 0,
+					'status'          => 'invalid',
+					'invalid_reasons' => $reasons,
+				)
+			);
+		} catch ( \Throwable $e ) {
+			// Status bookkeeping must never break the save itself.
+			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Only record of the swallowed bookkeeping failure.
+			error_log( '[CTXFeed V8] could not record invalid feed status for ' . $feed_name . ': ' . $e->getMessage() );
+		}
+	}
+
+	/**
+	 * Compose the response warning for a validation-blocked auto-generation.
+	 *
+	 * @since 8.0.21
+	 *
+	 * @param string[] $reasons Validator error strings (may be empty).
+	 * @return string[] Zero-or-one composed warning strings.
+	 */
+	private function generation_skip_warnings( array $reasons ): array {
+		if ( empty( $reasons ) ) {
+			return array();
+		}
+
+		return array(
+			sprintf(
+				/* translators: %s: semicolon-separated validation problems. */
+				__( 'Saved, but automatic generation was skipped — this feed cannot generate yet: %s', 'woo-feed' ),
+				implode( '; ', $reasons )
+			),
+		);
 	}
 
 	// =====================================================================
@@ -1686,8 +2050,12 @@ class FeedEndpoint extends RestController {
 			$options    = $group['options'] ?? array();
 			foreach ( $options as $key => $label ) {
 				$data[ $key ] = array(
-					'label' => $label,
-					'group' => $group_name,
+					'label'        => $label,
+					'group'        => $group_name,
+					// Whether the category-mapping editor can SEARCH a channel
+					// taxonomy for this template; false = free-text mapping
+					// (CBT-596, V5 parity).
+					'has_taxonomy' => CategoryMappingEndpoint::has_taxonomy( (string) $key ),
 				);
 			}
 		}
@@ -1751,6 +2119,7 @@ class FeedEndpoint extends RestController {
 	 * @param array  $ftp                 Remote transport settings (enabled, protocol, mode, host, port, username, password, path).
 	 * @param array  $existing_feedrules  Previously saved feedrules; used to keep the stored FTP password when the form sends a masked value. Empty on create.
 	 * @param array  $advanced_filter     Advanced filter groups from the query builder.
+	 * @param string $composite_price     Composite product price mode (V5 key): 'parent_product_price' | 'all_product_price' | ''.
 	 * @return array V5-compatible feedrules.
 	 */
 	private function build_feedrules_from_form(
@@ -1768,7 +2137,8 @@ class FeedEndpoint extends RestController {
 		string $tax_country = '',
 		array $ftp = array(),
 		array $existing_feedrules = array(),
-		array $advanced_filter = array()
+		array $advanced_filter = array(),
+		string $composite_price = ''
 	): array {
 		// Build parallel arrays from row objects.
 		$mattributes = array();
@@ -1793,8 +2163,14 @@ class FeedEndpoint extends RestController {
 			$prefixes[]   = Sanitizer::preserve_whitespace( $row['prefix'] ?? '' );
 			$types[]      = isset( $row['type'] ) ? sanitize_text_field( $row['type'] ) : 'attribute';
 			$attributes[] = isset( $row['attribute'] ) ? sanitize_text_field( $row['attribute'] ) : '';
-			$defaults[]   = isset( $row['default'] ) ? sanitize_text_field( $row['default'] ) : '';
-			$suffixes[]   = Sanitizer::preserve_whitespace( $row['suffix'] ?? '' );
+			// Free Text / default values may contain HTML (#68913):
+			// sanitize_text_field stripped every tag on save, so markup a
+			// customer typed never reached generation. rich_text keeps the
+			// wp_kses_post-safe tag set and strips XSS vectors; templates
+			// escape/CDATA the value again at render.
+			// text_value (CBT-607): kses alone stored `>` / `&` as entities.
+			$defaults[] = isset( $row['default'] ) ? Sanitizer::text_value( $row['default'] ) : '';
+			$suffixes[] = Sanitizer::preserve_whitespace( $row['suffix'] ?? '' );
 			// V5-parity multiselect: each row stores an ARRAY of output-type
 			// codes (['2','12']). Accept the array, a comma-joined string, or
 			// a bare code and whitelist to the known 1–24 set. NOT
@@ -1834,7 +2210,15 @@ class FeedEndpoint extends RestController {
 			// `$config->get_feed_language()`. Empty when no multilingual
 			// plugin is active (the UI renders no Language select then).
 			'feedLanguage'      => sanitize_text_field( $form['feedLanguage'] ?? '' ),
-			'is_variations'     => sanitize_text_field( $form['includeVariations'] ?? '' ),
+			// CBT-584 (BUG-0085): persist the UI's default when the API omits
+			// or blanks the field. The UI form REQUIRES a choice, so '' can
+			// only come from an API/MCP caller — it used to persist verbatim,
+			// generating correctly (ProductQuery normalizes blank to 'y') but
+			// rendering the edit screen's required dropdown as unset. An
+			// explicit choice, including 'n', persists untouched.
+			'is_variations'     => ( '' === sanitize_text_field( $form['includeVariations'] ?? '' ) )
+				? 'y'
+				: sanitize_text_field( $form['includeVariations'] ),
 			// Variation strategy keys (V5: `variable_price` /
 			// `variable_quantity`) — which variation's price/quantity a
 			// VARIABLE (parent) row reports when `is_variations` is 'n' or
@@ -1861,6 +2245,13 @@ class FeedEndpoint extends RestController {
 			// sanitize would strip them.
 			'extraHeader'       => wp_unslash( (string) ( $form['extraHeader'] ?? '' ) ),
 			'cron'              => sanitize_text_field( $form['intervalTime'] ?? '' ),
+			// Minute intervals (Pro): the m5/m15/m30/m45 picker codes persist
+			// as SECONDS in update_interval — resolve_interval()'s highest-
+			// precedence source — mapped by the Pro Scheduling engine through
+			// ctxfeed_update_interval_seconds (CBT-653). Hour codes (and free)
+			// write '' so a feed switched back to hours is not stuck on the
+			// stale minute value.
+			'update_interval'   => self::minute_interval_seconds( (string) ( $form['intervalTime'] ?? '' ), $form ),
 			'mattributes'       => $mattributes,
 			'prefix'            => $prefixes,
 			'type'              => $types,
@@ -1977,8 +2368,14 @@ class FeedEndpoint extends RestController {
 			if ( '' === $subject ) {
 				continue;
 			}
+			// CBT-585: per-rule matching mode — 'literal' | 'regex', or ''
+			// for the V5-legacy slash-detect behavior existing configs rely
+			// on. Validated upstream by string_replace_shape_error().
+			$mode = isset( $row['mode'] ) ? sanitize_text_field( $row['mode'] ) : '';
+
 			$safe_str_replace[] = array(
 				'subject' => $subject,
+				'mode'    => in_array( $mode, array( 'literal', 'regex' ), true ) ? $mode : '',
 				// search/replace must PRESERVE whitespace and Unicode:
 				// customers commonly want to match/replace patterns like
 				// ", " (comma+space) or "\n" — sanitize_textarea_field
@@ -2106,6 +2503,10 @@ class FeedEndpoint extends RestController {
 		$feedrules['tax_country']      = in_array( $tax_country, array( 'feed', 'all' ), true )
 			? $tax_country
 			: '';
+
+		// Composite product price (V5 key, Pro; CBT-654). The Pro composite
+		// shims act only on 'all_product_price'; anything else is base price.
+		$feedrules['composite_price'] = self::sanitize_composite_price( $composite_price );
 
 		// FTP / SFTP upload settings (V5 feedrules keys).
 		// Passwords are encrypted at rest via V8 Encryptor. Empty password
@@ -2330,6 +2731,350 @@ class FeedEndpoint extends RestController {
 	}
 
 	/**
+	 * Minute-level picker codes (Pro). Free knows the codes only to reject
+	 * them when the `short_update_intervals` gate is closed; the seconds
+	 * come from the Pro engine (CBT-653).
+	 *
+	 * @since 8.0.27
+	 * @var string[]
+	 */
+	private const MINUTE_INTERVAL_CODES = array( 'm5', 'm15', 'm30', 'm45' );
+
+	/**
+	 * Allowed minute-interval picker codes → seconds (Pro).
+	 *
+	 * Whitelisted so a hand-crafted request can't schedule arbitrary
+	 * sub-minute churn; anything not in the map (including all hour codes)
+	 * returns '' — which resolve_interval() ignores.
+	 *
+	 * @since 8.0.19
+	 *
+	 * @param string $code intervalTime form code ('m15', '24', …).
+	 * @param array  $form makeFeedForm from the request (passed to the seam).
+	 * @return int|string Seconds for a known minute code (Pro engine), '' otherwise.
+	 */
+	private static function minute_interval_seconds( string $code, array $form = array() ) {
+		if ( ! in_array( $code, self::MINUTE_INTERVAL_CODES, true ) ) {
+			return '';
+		}
+
+		/**
+		 * Filter the per-feed update interval, in seconds, for a picker code.
+		 *
+		 * The minute codes are a Pro feature: the Pro Scheduling engine
+		 * maps m5/m15/m30/m45 here (CBT-653). Free returns '' so the
+		 * scheduler falls back to the hourly `cron` code.
+		 *
+		 * @since 8.0.27
+		 *
+		 * @param int|string $seconds '' (no per-feed override) or seconds.
+		 * @param string     $code    intervalTime form code ('m15', '24', …).
+		 * @param array      $form    makeFeedForm from the request.
+		 */
+		$seconds = apply_filters( 'ctxfeed_update_interval_seconds', '', $code, $form );
+
+		return is_numeric( $seconds ) && (int) $seconds > 0 ? (int) $seconds : '';
+	}
+
+	/**
+	 * Whitelist the composite product price mode (V5 `composite_price`).
+	 *
+	 * @since 8.0.27
+	 *
+	 * @param mixed $value Raw request value.
+	 * @return string 'parent_product_price', 'all_product_price' or ''.
+	 */
+	private static function sanitize_composite_price( $value ): string {
+		$value = is_string( $value ) ? trim( $value ) : '';
+
+		return in_array( $value, array( 'parent_product_price', 'all_product_price' ), true ) ? $value : '';
+	}
+
+	/**
+	 * Reject minute-interval codes when the Pro gate is closed.
+	 *
+	 * @since 8.0.19
+	 *
+	 * @param array $form makeFeedForm from the request.
+	 * @return string '' when allowed, else the error message.
+	 */
+	private function minute_interval_gate_error( array $form ): string {
+		$code = (string) ( $form['intervalTime'] ?? '' );
+		if ( ! in_array( $code, self::MINUTE_INTERVAL_CODES, true ) ) {
+			return '';
+		}
+		if ( \CTXFeed\V8\Core\FeatureGate::has( 'short_update_intervals' ) ) {
+			return '';
+		}
+
+		return __( 'Minute-level update intervals are a Pro feature. Choose an hourly interval, or upgrade to CTX Feed Pro.', 'woo-feed' );
+	}
+
+	/**
+	 * Validate String Replace rows against the recognized shape (CBT-585).
+	 *
+	 * Accepted keys per row: subject, search, replace, mode. A row carrying
+	 * ANY other key (find/replaceWith/attribute — the shapes an API caller
+	 * plausibly guesses) used to be dropped or half-read silently; it now
+	 * blocks the save with the accepted keys spelled out. mode, when
+	 * present, must be '', 'literal' or 'regex'.
+	 *
+	 * @since 8.0.21
+	 *
+	 * @param array $rows stringReplace request rows.
+	 * @return string Error message, '' when every row is well-shaped.
+	 */
+	private function string_replace_shape_error( array $rows ): string {
+		$accepted = array( 'subject', 'search', 'replace', 'mode' );
+
+		foreach ( array_values( $rows ) as $i => $row ) {
+			if ( ! is_array( $row ) ) {
+				continue; // Non-array rows are dropped by the sanitizer as before.
+			}
+
+			$unknown = array_diff( array_keys( $row ), $accepted );
+			if ( ! empty( $unknown ) ) {
+				return sprintf(
+					/* translators: 1: row number, 2: unrecognized key list, 3: accepted key list. */
+					__( 'String Replace row %1$d uses unrecognized field(s): %2$s. Each rule accepts only: %3$s.', 'woo-feed' ),
+					$i + 1,
+					implode( ', ', array_map( 'strval', $unknown ) ),
+					implode( ', ', $accepted )
+				);
+			}
+
+			$mode = isset( $row['mode'] ) ? (string) $row['mode'] : '';
+			if ( ! in_array( $mode, array( '', 'literal', 'regex' ), true ) ) {
+				return sprintf(
+					/* translators: 1: row number, 2: the invalid mode value. */
+					__( 'String Replace row %1$d has an invalid mode "%2$s" — use "literal", "regex", or omit it for the legacy behavior.', 'woo-feed' ),
+					$i + 1,
+					$mode
+				);
+			}
+		}
+
+		return '';
+	}
+
+	/**
+	 * Per-row completeness check for the mapping table (BUG-0083 / #make-feed
+	 * required fields, owner decision 2026-09-10).
+	 *
+	 * Every row must name a channel attribute (`mattribute`) AND carry a
+	 * value source: the mapped product attribute for `type=attribute` rows,
+	 * or a non-empty literal for `type=pattern` (Text) rows. Half-empty rows
+	 * previously saved silently and rendered invalid no-tag-name XML
+	 * elements. Runs on BOTH save paths (create + full update), which the
+	 * MCP create-feed/update-feed abilities also go through.
+	 *
+	 * @since 8.0.19
+	 *
+	 * @param array $rules feedRules row array from the request.
+	 * @return string '' when complete, else a message naming the rows.
+	 */
+	private function incomplete_rows_message( array $rules ): string {
+		$problems = array();
+		$position = 0;
+
+		foreach ( $rules as $row ) {
+			if ( ! is_array( $row ) ) {
+				continue;
+			}
+			++$position;
+
+			$row_problems = array();
+			if ( '' === trim( (string) ( $row['mattribute'] ?? '' ) ) ) {
+				$row_problems[] = __( 'channel attribute', 'woo-feed' );
+			}
+
+			$type = (string) ( $row['type'] ?? 'attribute' );
+			if ( 'attribute' === $type ) {
+				if ( '' === trim( (string) ( $row['attribute'] ?? '' ) ) ) {
+					$row_problems[] = __( 'value attribute', 'woo-feed' );
+				}
+			} elseif ( '' === trim( (string) ( $row['default'] ?? '' ) ) ) {
+				$row_problems[] = __( 'text value', 'woo-feed' );
+			}
+
+			if ( ! empty( $row_problems ) ) {
+				$problems[] = sprintf(
+					/* translators: 1: row number, 2: missing field list. */
+					__( 'row %1$d is missing: %2$s', 'woo-feed' ),
+					$position,
+					implode( ', ', $row_problems )
+				);
+			}
+		}
+
+		if ( empty( $problems ) ) {
+			return '';
+		}
+
+		return sprintf(
+			/* translators: %s: per-row problem list. */
+			__( 'Mapping incomplete — %s. Every row needs a channel attribute and a value (or remove the row).', 'woo-feed' ),
+			implode( '; ', $problems )
+		);
+	}
+
+	/**
+	 * Debug one product against one feed — stage-by-stage pipeline verdicts.
+	 *
+	 * The support answer to "why is product X wrong / missing in feed Y":
+	 * runs the REAL generation machinery for a single product and reports
+	 * (1) whether the feed's product query selects the id, (2) whether the
+	 * filter stage keeps it and WHICH filter dropped it, and (3) the
+	 * resolved, transformed and merchant-mapped row — even for excluded
+	 * products, so wrong values and exclusions are diagnosable in one call.
+	 * Read-only: nothing is written, scheduled, or cached. Exposed as the
+	 * ctxfeed/debug-feed-product MCP read ability.
+	 *
+	 * The query stage runs the feed's full id query — acceptable for a
+	 * support/debug action, never on the generation path.
+	 *
+	 * @since 8.0.19
+	 *
+	 * @param \WP_REST_Request $request REST request object.
+	 * @return \WP_REST_Response
+	 */
+	public function debug_feed_product( \WP_REST_Request $request ): \WP_REST_Response {
+		$feed = $this->find_feed( $request->get_param( 'id' ) );
+		if ( ! $feed ) {
+			return $this->error( __( 'Feed not found.', 'woo-feed' ), 404 );
+		}
+
+		$product_id = (int) $request->get_param( 'product_id' );
+		$product    = wc_get_product( $product_id );
+		if ( ! $product instanceof \WC_Product ) {
+			return $this->error( __( 'Product not found.', 'woo-feed' ), 404 );
+		}
+
+		$container = Container::get_instance();
+
+		// phpcs:ignore Generic.Commenting.DocComment.MissingShort -- Single-line @var type hint for static analysis.
+		/** @var \CTXFeed\V8\Feed\FeedManager $manager */
+		$manager = $container->resolve( 'feed.manager' );
+		$config  = $manager->get_config( $feed['slug'] );
+		if ( ! $config ) {
+			return $this->error( __( 'Feed configuration could not be loaded.', 'woo-feed' ), 500 );
+		}
+
+		// Same mapping augmentation generation applies (identifier_exists etc.)
+		// so the debugged row matches what the real feed would ship.
+		$config = \CTXFeed\V8\Channel\AutoAttributes::apply( $config );
+
+		$snapshot = array(
+			'id'                 => $product->get_id(),
+			'type'               => $product->get_type(),
+			'status'             => $product->get_status(),
+			'catalog_visibility' => $product->get_catalog_visibility(),
+			'stock_status'       => $product->get_stock_status(),
+			'price'              => (string) $product->get_price(),
+			'sku'                => (string) $product->get_sku(),
+			'parent_id'          => $product->get_parent_id(),
+		);
+
+		// The real generator fires the V5 batch/loop lifecycle hooks around
+		// its work, and the compat shims key on them: currency switchers
+		// (CURCY, VillaTheme, WCML) swap the active currency on
+		// before_woo_feed_generate_batch_data, language shims filter the
+		// product ids, and every one of them restores state on the after
+		// hooks. Without the same hooks this debugger resolved prices in the
+		// store currency while the file was converted (CBT-612 / BUG-0104).
+		// Batch hooks before the query (as in FeedGenerator), loop hooks
+		// before resolution, every after hook in a finally so a throw still
+		// restores the site.
+		$feed_rules_array = method_exists( $config, 'to_array' ) ? $config->to_array() : array();
+		$loop_started     = false;
+		// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Exact V5 legacy hook name; Legacy Bridge compatibility requires it unchanged.
+		do_action( 'before_woo_feed_generate_batch_data', $config );
+		// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Exact V5 legacy hook name; Legacy Bridge compatibility requires it unchanged.
+		do_action( 'before_woo_feed_get_product_information', $config );
+		try {
+			// Stage 1 — product query selection (post_status/type/include-exclude
+			// lists and query-level push-downs).
+			$query_ids         = $container->resolve( 'product.query' )->get_ids( $config );
+			$selected_by_query = in_array( $product_id, array_map( 'intval', $query_ids ), true );
+
+			// Stage 2 — filter verdict, capturing WHICH filter excluded via the
+			// same action the batch loop tallies. Run even for unselected
+			// products: both verdicts together explain the exclusion.
+			\CTXFeed\V8\Product\ProductMemo::clear();
+			\CTXFeed\V8\Product\ProductMemo::remember_current( $product );
+
+			$excluded_by     = array();
+			$ctx_debug_tally = static function ( $filter_name ) use ( &$excluded_by ) {
+				$excluded_by[] = (string) $filter_name;
+			};
+			add_action( 'ctxfeed_filter_excluded', $ctx_debug_tally, 10, 1 );
+			try {
+				$passed_filters = (bool) $container->resolve( 'filter.manager' )->should_include( $product, $config );
+			} finally {
+				remove_action( 'ctxfeed_filter_excluded', $ctx_debug_tally, 10 );
+			}
+
+			// Stage 3 — resolve → transform → merchant mapping. Always attempted
+			// (an excluded product's wrong values are still worth seeing); a throw
+			// here is itself the diagnosis for per-product skip errors.
+			$resolved = null;
+			$output   = null;
+			$error    = null;
+			do_action( 'woo_feed_before_product_loop', array( $product_id ), $feed_rules_array, $config );
+			$loop_started = true;
+			try {
+				$resolved    = $container->resolve( 'product.repository' )->resolve_single( $product, $config );
+				$transformed = $container->resolve( 'transform.pipeline' )->apply( $resolved, $config );
+				$provider    = $config->get_provider();
+				$format      = strtolower( (string) $config->get( 'feedType', 'xml' ) );
+				$output      = $container->resolve( 'channel.attribute_mapper' )->map_product_data( $transformed, $provider, $format );
+			} catch ( \Throwable $e ) {
+				$error = array(
+					'type'    => get_class( $e ),
+					'message' => $e->getMessage(),
+				);
+			}
+		} finally {
+			if ( $loop_started ) {
+				do_action( 'woo_feed_after_product_loop', array( $product_id ), $feed_rules_array, $config );
+			}
+			// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Exact V5 legacy hook name; Legacy Bridge compatibility requires it unchanged.
+			do_action( 'after_woo_feed_get_product_information', $config );
+			// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Exact V5 legacy hook name; Legacy Bridge compatibility requires it unchanged.
+			do_action( 'after_woo_feed_generate_batch_data', $config );
+		}
+
+		return $this->success(
+			array(
+				'feed'              => array(
+					'slug'      => $feed['slug'],
+					'provider'  => $feed['provider'],
+					'file_type' => $feed['file_type'],
+				),
+				'product'           => $snapshot,
+				'selected_by_query' => $selected_by_query,
+				'passed_filters'    => $passed_filters,
+				'excluded_by'       => array_values( array_unique( $excluded_by ) ),
+				'would_be_in_feed'  => $selected_by_query && $passed_filters && null === $error,
+				'resolved'          => $resolved,
+				'output'            => $output,
+				'error'             => $error,
+				/**
+				 * Extra per-feed diagnoses from extensions (warn-only strings).
+				 * Pro appends attribute-mapping cycle warnings here (CBT-588).
+				 *
+				 * @since 8.0.22
+				 *
+				 * @param array                  $warnings Warnings so far.
+				 * @param \CTXFeed\V8\Core\Config $config   The feed's config.
+				 * @param \WC_Product            $product  The product being debugged.
+				 */
+				'warnings'          => array_values( array_unique( array_map( 'strval', (array) apply_filters( 'ctxfeed_debug_product_warnings', array(), $config, $product ) ) ) ),
+			)
+		);
+	}
+
+	/**
 	 * Find a feed by option_id (numeric) or option_name/slug.
 	 *
 	 * @since 8.0.0
@@ -2441,10 +3186,14 @@ class FeedEndpoint extends RestController {
 	 *
 	 * @param string $option_name `wf_feed_<slug>` option name.
 	 * @param array  $feed_data   Stored feed array (status, feedrules, ...).
+	 * @param bool   $purge_runs  Also cancel the feed's queued/in-flight runs —
+	 *                            pass true ONLY on an explicit auto-update
+	 *                            toggle-OFF (the user's stop gesture, #68345),
+	 *                            never on ordinary saves.
 	 *
 	 * @return void
 	 */
-	private function sync_feed_schedule( string $option_name, array $feed_data ): void {
+	private function sync_feed_schedule( string $option_name, array $feed_data, bool $purge_runs = false ): void {
 		if ( ! defined( 'CTXFEED_V8_ACTIVE' ) || ! CTXFEED_V8_ACTIVE ) {
 			return; // V5 owns its own cron — don't touch.
 		}
@@ -2462,6 +3211,16 @@ class FeedEndpoint extends RestController {
 			/** @var FeedScheduler $scheduler */ // phpcs:ignore Generic.Commenting.DocComment.MissingShort -- Inline @var type annotation for IDE/static analysis, not a documentation block.
 			$scheduler = $container->resolve( 'feed.scheduler' );
 			$scheduler->sync_recurring_schedule( $feed_name, $feed_data );
+
+			// Toggle-OFF is the user's "make it stop" gesture (#68345):
+			// besides cancelling the recurring schedule, kill everything
+			// already queued or in flight for this feed — batches, finalize,
+			// the lock-busy re-queue singles — and clear the run state so
+			// editing unblocks. Only the explicit toggle transitions pass
+			// $purge_runs; ordinary saves never cancel a running generation.
+			if ( $purge_runs && method_exists( $scheduler, 'cancel_feed_runs' ) ) {
+				$scheduler->cancel_feed_runs( $feed_name );
+			}
 		} catch ( \Throwable $e ) {
 			// Schedule sync must never break a feed save. Log and move on.
 			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Not debug code: schedule sync must never break a feed save, so the exception is swallowed. Without this line the failure would be completely silent.
@@ -2524,6 +3283,12 @@ class FeedEndpoint extends RestController {
 	private function display_interval( array $config ): string {
 		if ( ! $this->is_auto_update_on( $config ) ) {
 			return '—';
+		}
+
+		$seconds = \CTXFeed\V8\Feed\FeedScheduler::effective_interval_seconds( $config );
+		if ( $seconds < ( defined( 'HOUR_IN_SECONDS' ) ? HOUR_IN_SECONDS : 3600 ) ) {
+			/* translators: %d: number of minutes */
+			return sprintf( __( 'Every %d Minutes', 'woo-feed' ), (int) round( $seconds / 60 ) );
 		}
 
 		return $this->format_interval( (string) \CTXFeed\V8\Feed\FeedScheduler::effective_interval_hours( $config ) );

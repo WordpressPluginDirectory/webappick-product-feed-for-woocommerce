@@ -16,8 +16,6 @@
 namespace CTXFeed\V8\Product;
 
 use CTXFeed\V8\Core\Config;
-use CTXFeed\V8\Core\FeatureGate;
-use CTXFeed\V8\Transform\CommandProcessor;
 use CTXFeed\V8\Transform\OutputTypeTransform;
 
 // Exit if accessed directly.
@@ -297,6 +295,29 @@ class ProductRepository {
 			}
 		}
 
+		// 3.5. V5's SECOND legacy hook family — the `woo_feed_get_*` filters
+		// (V5 AttributeValueByType::apply_filters_to_attribute_value(), fired
+		// for EVERY mapping row). Customer snippets in the wild target these
+		// (e.g. `woo_feed_get_short_description_attribute`, #68973), and
+		// V5's own per-channel overrides used the provider variants.
+		//
+		// ORDERING NOTE (deviation vs V5, deliberate): V5 fired the family at
+		// the END of process_output() — after output_types, commands and
+		// prefix/suffix. In V8 those stages run downstream in the
+		// TransformPipeline without product context, so the family fires
+		// HERE on the resolved (pre-transform) value — the same hoisting
+		// documented for the parent command trio in apply_parent_command().
+		// A filter that REPLACES the value (the dominant real-world use)
+		// sees no difference; prefix/suffix now apply ON TOP of a replaced
+		// value instead of being silently dropped with it.
+		$value = $this->apply_legacy_get_filters(
+			$value,
+			$product,
+			$config,
+			$wc_attr,
+			isset( $mapping['merchant_attr'] ) ? (string) $mapping['merchant_attr'] : ''
+		);
+
 		// 4. V5 parent-aware output_type codes (18/19/20/23/24).
 		// These need product context + a way to re-resolve attributes,
 		// so they live here rather than in OutputTypeTransform (which
@@ -310,6 +331,59 @@ class ProductRepository {
 		// product-context constraint as step 4; the string commands in the
 		// chain run downstream in CommandTransform. XFRM-FRD-9.5.
 		$value = $this->apply_parent_command( $value, $product, $mapping, $config );
+
+		return $value;
+	}
+
+	/**
+	 * Fire V5's `woo_feed_get_*` legacy filter family on a resolved value.
+	 *
+	 * Four hooks in V5's exact order and 5-arg signature
+	 * `($value, $product, $config, $product_attribute, $merchant_attribute)`:
+	 *
+	 *   1. `woo_feed_get_attribute`                        — generic, every row.
+	 *   2. `woo_feed_get_{$wc_attr}_attribute`             — per source attribute.
+	 *   3. `woo_feed_get_{$provider}_attribute`            — per channel.
+	 *   4. `woo_feed_get_{$provider}_{$merchant}_attribute` — channel + column;
+	 *      the merchant name is cleaned of spaces and the `g:` prefix before
+	 *      building the hook name AND as the passed arg (V5 parity —
+	 *      AttributeValueByType.php:459-481; V5's "template" IS the provider,
+	 *      Config::get_feed_template() just returned it).
+	 *
+	 * Every hook is has_filter-guarded, so the typical site (nothing
+	 * registered) pays four array lookups per row and no apply_filters call.
+	 *
+	 * @since 8.0.17
+	 *
+	 * @param mixed       $value         Resolved attribute value.
+	 * @param \WC_Product $product       Product being exported.
+	 * @param Config      $config        Feed configuration.
+	 * @param string      $wc_attr       Source (product) attribute name.
+	 * @param string      $merchant_attr Merchant attribute (column) name.
+	 *
+	 * @return mixed Filtered value.
+	 */
+	private function apply_legacy_get_filters( $value, \WC_Product $product, Config $config, string $wc_attr, string $merchant_attr ) {
+		$provider       = $config->get_provider();
+		$merchant_clean = str_replace( array( ' ', 'g:' ), '', $merchant_attr );
+
+		// Hooks 1-3 pass the ORIGINAL merchant name; hook 4 passes the
+		// cleaned one — V5 reassigned the variable right before hook 4.
+		$hooks = array(
+			array( 'woo_feed_get_attribute', $merchant_attr ),
+			array( "woo_feed_get_{$wc_attr}_attribute", $merchant_attr ),
+			array( "woo_feed_get_{$provider}_attribute", $merchant_attr ),
+			array( "woo_feed_get_{$provider}_{$merchant_clean}_attribute", $merchant_clean ),
+		);
+
+		foreach ( $hooks as $entry ) {
+			list( $hook, $merchant_arg ) = $entry;
+
+			if ( has_filter( $hook ) ) {
+				// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.DynamicHooknameFound -- Hook names are built above from the fixed woo_feed_get_ prefix plus attribute/provider slugs; the sniff cannot resolve the variable.
+				$value = apply_filters( $hook, $value, $product, $config, $wc_attr, $merchant_arg );
+			}
+		}
 
 		return $value;
 	}
@@ -511,13 +585,12 @@ class ProductRepository {
 	 *      `ctx-compatibility/` submodule) hooks this. Returns the
 	 *      filter result directly when WPML translates the post.
 	 *
-	 *   2. Polylang — direct API call, Pro-gated.
-	 *      V5's `CommonHelper::woo_feed_pll_get_original_post_id()` used
-	 *      `pll_get_post_translations($id)[pll_default_language()]`. We
-	 *      mirror that. Polylang integration is a Pro feature in V8
-	 *      (matching V5's `CompatibilityFactory::compatible_plugins()`
-	 *      gating, where Polylang was in the Pro-only manifest), so this
-	 *      path is gated by `FeatureGate::has('polylang_translation')`.
+	 *   2. Polylang — the Pro PolylangParentLanguage engine, through the
+	 *      `ctxfeed_parent_language_post_id` seam (CBT-652). V5's
+	 *      `CommonHelper::woo_feed_pll_get_original_post_id()` used
+	 *      `pll_get_post_translations($id)[pll_default_language()]`; the
+	 *      engine mirrors that behind `polylang_translation` (V5 kept
+	 *      Polylang in the Pro-only compat manifest).
 	 *
 	 * Returning the original `$product_id` means "no translation found"
 	 * — the caller treats that as a no-op.
@@ -535,60 +608,23 @@ class ProductRepository {
 			return $wpml_id;
 		}
 
-		// Step 2 — Polylang, Pro-gated.
-		if ( ! FeatureGate::has( 'polylang_translation' ) ) {
-			return $product_id;
-		}
-
-		if ( ! $this->is_polylang_active() ) {
-			return $product_id;
-		}
-
-		$translations = pll_get_post_translations( $product_id );
-		if ( ! is_array( $translations ) || empty( $translations ) ) {
-			return $product_id;
-		}
-
-		$default_language = pll_default_language();
-		if ( '' === $default_language || ! isset( $translations[ $default_language ] ) ) {
-			return $product_id;
-		}
-
-		$source_id = (int) $translations[ $default_language ];
-		return $source_id > 0 ? $source_id : $product_id;
-	}
-
-	/**
-	 * Detect whether Polylang is active and its core API is loaded.
-	 *
-	 * Default heuristic: V5's `PolylangCompatibility` check —
-	 * `defined('POLYLANG_BASENAME') || function_exists('PLL')`.
-	 *
-	 * The result is run through `ctxfeed_polylang_detected` so admins
-	 * with custom Polylang setups (e.g. headless WP using polylang-rest)
-	 * can override the detection — and so unit tests can stub it
-	 * deterministically without relying on Brain\Monkey's
-	 * `function_exists` state, which leaks between tests once any
-	 * sibling test stubs a `pll_*` function.
-	 *
-	 * @since 8.0.0
-	 *
-	 * @return bool True when Polylang's API is callable.
-	 */
-	private function is_polylang_active(): bool {
-		$default = defined( 'POLYLANG_BASENAME' )
-			|| function_exists( 'PLL' )
-			|| function_exists( 'pll_get_post_translations' );
-
 		/**
-		 * Override Polylang detection. Return true to force the
-		 * Polylang code path on; false to force it off.
+		 * Filter the source-language post id for the parent-language
+		 * output types (23/24) when WPML did not translate the post.
 		 *
-		 * @since 8.0.0
+		 * The Pro PolylangParentLanguage engine answers here (CBT-652):
+		 * V5's `pll_get_post_translations( $id )[ pll_default_language() ]`,
+		 * gated on `polylang_translation` and Polylang detection. Returning
+		 * the product id means "no translation" (a no-op for the caller).
 		 *
-		 * @param bool $detected Default detection result.
+		 * @since 8.0.27
+		 *
+		 * @param int $source_id  Source-language post id (defaults to the product id).
+		 * @param int $product_id Current product (translated post) id.
 		 */
-		return (bool) apply_filters( 'ctxfeed_polylang_detected', $default );
+		$source_id = (int) apply_filters( 'ctxfeed_parent_language_post_id', $product_id, $product_id );
+
+		return $source_id > 0 ? $source_id : $product_id;
 	}
 
 	/**
@@ -677,7 +713,6 @@ class ProductRepository {
 		$types          = $config->get_type();
 		$defaults       = $config->get_default();
 		$output_types   = (array) $config->get( 'output_type', array() );
-		$commands_open  = FeatureGate::has( CommandProcessor::FEATURE );
 
 		$rows            = array();
 		$parent_codes    = array();
@@ -714,15 +749,25 @@ class ProductRepository {
 				}
 			}
 
-			// Parent command code for this row ('' when none). Commands are
-			// a Pro feature — closed gate compiles to no commands at all.
-			if ( $commands_open ) {
-				$commands = $config->get_attribute_command( (int) $index );
-				if ( '' !== $commands ) {
-					$code = CommandProcessor::parent_output_code( $commands );
-					if ( '' !== $code ) {
-						$parent_commands[ $index ] = $code;
-					}
+			// Parent command code for this row ('' when none). The command
+			// chain is a Pro feature: the Pro OutputCommands engine parses it
+			// through ctxfeed_parent_command_code (CBT-653); free compiles
+			// no parent commands at all.
+			$commands = $config->get_attribute_command( (int) $index );
+			if ( '' !== $commands ) {
+				/**
+				 * Filter the parent-trio output_type code a command chain maps to.
+				 *
+				 * @since 8.0.27
+				 *
+				 * @param string       $code     '18' (only_parent), '19' (parent), '20' (parent_if_empty) or ''.
+				 * @param string|array $commands Raw command chain of the row.
+				 * @param int          $index    Row index.
+				 * @param Config       $config   Feed configuration.
+				 */
+				$code = (string) apply_filters( 'ctxfeed_parent_command_code', '', $commands, (int) $index, $config );
+				if ( in_array( $code, array( '18', '19', '20' ), true ) ) {
+					$parent_commands[ $index ] = $code;
 				}
 			}
 		}

@@ -60,6 +60,15 @@ class TemplateDefaults {
 	private static $currency;
 
 	/**
+	 * Per-request memo: does this store have at least one WooCommerce
+	 * Brands (product_brand) term? null = not computed yet.
+	 *
+	 * @since 8.0.23
+	 * @var bool|null
+	 */
+	private static $brand_terms = null;
+
+	/**
 	 * Constructor — initialize brand and currency.
 	 *
 	 * @since 8.0.0
@@ -101,19 +110,26 @@ class TemplateDefaults {
 			return self::$brand;
 		}
 
-		$brand = '';
-		$url   = filter_var( site_url(), FILTER_SANITIZE_URL );
+		// Prefer the human site NAME over the domain parse below: the parse
+		// takes the second-to-last host segment, so every two-level-TLD store
+		// shipped its TLD as the brand — freshboost.com.au exported
+		// brand "Com" to Google (#68893's mystery value was exactly this).
+		$brand = trim( (string) get_bloginfo( 'name' ) );
 
-		if ( false !== $url ) {
-			$url = wp_parse_url( $url );
+		if ( '' === $brand ) {
+			$url = filter_var( site_url(), FILTER_SANITIZE_URL );
 
-			if ( array_key_exists( 'host', $url ) ) {
-				if ( strpos( $url['host'], '.' ) !== false ) {
-					$arr   = explode( '.', $url['host'] );
-					$brand = $arr[ count( $arr ) - 2 ];
-					$brand = ucfirst( $brand );
-				} else {
-					$brand = ucfirst( $url['host'] );
+			if ( false !== $url ) {
+				$url = wp_parse_url( $url );
+
+				if ( is_array( $url ) && array_key_exists( 'host', $url ) ) {
+					if ( strpos( $url['host'], '.' ) !== false ) {
+						$arr   = explode( '.', $url['host'] );
+						$brand = $arr[ count( $arr ) - 2 ];
+						$brand = ucfirst( $brand );
+					} else {
+						$brand = ucfirst( $url['host'] );
+					}
 				}
 			}
 		}
@@ -178,11 +194,11 @@ class TemplateDefaults {
 				? $config[ $merchant ]
 				: array();
 			$existing['feed_config_custom2'] = $custom2_default;
-			return $existing;
+			return self::with_brand_source( $existing );
 		}
 
 		if ( isset( $config[ $merchant ] ) ) {
-			return $config[ $merchant ];
+			return self::with_brand_source( $config[ $merchant ] );
 		}
 
 		// V5 parity: a few channels reuse the Google attribute template wholesale
@@ -200,11 +216,127 @@ class TemplateDefaults {
 			'pinterest' => 'google',
 		);
 		if ( isset( $template_aliases[ $merchant ], $config[ $template_aliases[ $merchant ] ] ) ) {
-			return $config[ $template_aliases[ $merchant ] ];
+			return self::with_brand_source( $config[ $template_aliases[ $merchant ] ] );
 		}
 
 		// Fall back to default template config.
-		return $config['default'] ?? array();
+		return self::with_brand_source( $config['default'] ?? array() );
+	}
+
+	/**
+	 * Whether the merchant-attribute NAME denotes a brand column.
+	 *
+	 * Name-guarded so shop-name-style columns that reuse the store brand as
+	 * their default stay static text.
+	 *
+	 * @since 8.0.23
+	 *
+	 * @param string $name Merchant attribute name.
+	 * @return bool
+	 */
+	public static function is_brand_column( string $name ): bool {
+		$name = strtolower( $name );
+
+		return false !== strpos( $name, 'brand' ) || false !== strpos( $name, 'manufacturer' );
+	}
+
+	/**
+	 * Whether the store has at least one WooCommerce core Brands term
+	 * (`product_brand`, WC 9.6+). Memoised per request.
+	 *
+	 * @since 8.0.23
+	 *
+	 * @return bool
+	 */
+	public static function store_has_brand_terms(): bool {
+		if ( null !== self::$brand_terms ) {
+			return self::$brand_terms;
+		}
+
+		$populated = false;
+		if ( function_exists( 'taxonomy_exists' ) && taxonomy_exists( 'product_brand' ) && function_exists( 'wp_count_terms' ) ) {
+			$count     = wp_count_terms(
+				array(
+					'taxonomy'   => 'product_brand',
+					'hide_empty' => false,
+				)
+			);
+			$populated = ! is_wp_error( $count ) && (int) $count > 0;
+		}
+
+		/**
+		 * Filter whether the store's Brands taxonomy is considered populated —
+		 * decides if new feeds' brand columns SOURCE `wc_brand_parent` (true)
+		 * or ship the visible static-text store brand row (false).
+		 *
+		 * @since 8.0.23
+		 *
+		 * @param bool $populated True when product_brand has at least one term.
+		 */
+		self::$brand_terms = (bool) apply_filters( 'ctxfeed_brand_taxonomy_populated', $populated );
+
+		return self::$brand_terms;
+	}
+
+	/**
+	 * Rewrite brand-ish columns whose default is the static store brand to
+	 * SOURCE the WooCommerce core Brands taxonomy — value `wc_brand_parent`
+	 * (Parent Brand) with NO hidden fallback — when the store actually has
+	 * Brands terms. Stores without any term keep the pre-8.0.17 VISIBLE
+	 * static-text row (type `pattern`, default = store brand).
+	 *
+	 * Why no hidden fallback (CBT-594): the mapping table renders the
+	 * `default` input only for Text rows, so a default carried on an
+	 * Attribute row is invisible and cannot be cleared. 8.0.17–8.0.22 kept
+	 * the store brand there and every brandless product shipped the SITE
+	 * TITLE as its brand — literally "localhost" on shops provisioned from
+	 * a local template (wp.org "Brand exported as Localhost", #69131).
+	 * An empty brand the user can see beats a wrong brand they cannot.
+	 *
+	 * Guarded by the merchant-attribute NAME (must contain brand /
+	 * manufacturer) so shop-name-style columns that reuse the store brand
+	 * as their default stay static text. Rows already sourcing a real
+	 * attribute keep their mapping. Existing feeds are untouched here —
+	 * template defaults only shape newly created feeds; saved 8.0.17-shape
+	 * rows are healed once on upgrade by {@see \CTXFeed\V8\Feed\BrandDefaultHeal}.
+	 *
+	 * @since 8.0.17
+	 * @since 8.0.23 No hidden default; taxonomy-populated gate.
+	 *
+	 * @param array $config One merchant's template-default config.
+	 * @return array
+	 */
+	private static function with_brand_source( array $config ): array {
+		foreach ( array( 'mattributes', 'attributes', 'type', 'default' ) as $key ) {
+			if ( ! isset( $config[ $key ] ) || ! is_array( $config[ $key ] ) ) {
+				return $config;
+			}
+		}
+
+		if ( ! self::store_has_brand_terms() ) {
+			return $config;
+		}
+
+		foreach ( $config['mattributes'] as $i => $mattr ) {
+			if ( ( $config['default'][ $i ] ?? '' ) !== self::$brand ) {
+				continue;
+			}
+
+			// A row already sourcing a real attribute keeps its mapping.
+			if ( '' !== (string) ( $config['attributes'][ $i ] ?? '' ) ) {
+				continue;
+			}
+
+			if ( ! self::is_brand_column( (string) $mattr ) ) {
+				continue;
+			}
+
+			$config['attributes'][ $i ] = 'wc_brand_parent';
+			$config['type'][ $i ]       = 'attribute';
+			$config['default'][ $i ]    = '';
+		}
+
+		return $config;
 	}
 
 	/**
@@ -3666,7 +3798,7 @@ class TemplateDefaults {
 					'',
 				),
 				'default'     => array( '', '', '', '', '', '1-3 working days', '', '', self::$brand, '', '', '', '', '', '', '' ),
-				'suffix'      => array( '', '', '', ' USD', '', '', '', '', '', '', '', '', '', '', '', '' ),
+				'suffix'      => array( '', '', '', ' ' . self::$currency, '', '', '', '', '', '', '', '', '', '', '', '' ),
 				'output_type' => array( '1', '1', '11', '6', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1', '1' ),
 				'limit'       => array( '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '' ),
 			),
@@ -3887,7 +4019,7 @@ class TemplateDefaults {
 					'price',
 				),
 				'default'     => array( '', '', '', '', '', '', '', '', '', self::$brand, '', '', '', '', '', '' ),
-				'suffix'      => array( '', '', '', '', '', '', '', '', '', '', '', '', '', ' USD', ' USD', ' USD' ),
+				'suffix'      => array( '', '', '', '', '', '', '', '', '', '', '', '', '', ' ' . self::$currency, ' ' . self::$currency, ' ' . self::$currency ),
 				'output_type' => array(
 					'1',
 					'1',
@@ -9471,7 +9603,7 @@ class TemplateDefaults {
 					'image_2',
 					'image_3',
 				),
-				'default'     => array( '', '', '', '', 'USD', '', '', '', 'Localhost', '', '', '' ),
+				'default'     => array( '', '', '', '', self::$currency, '', '', '', 'Localhost', '', '', '' ),
 				'suffix'      => array( '', '', '', '', '', '', '', '', '', '', '', '' ),
 				'output_type' => array( '1', '1', '11', '1', '1', '1', '1', '1', '1', '1', '1', '1' ),
 				'limit'       => array( '', '', '', '', '', '', '', '', '', '', '', '' ),
@@ -10623,8 +10755,8 @@ class TemplateDefaults {
 			),
 			'chatgpt'                => array(
 				'mattributes' => array(
-					'enable_search',
-					'enable_checkout',
+					'is_eligible_search',
+					'is_eligible_checkout',
 					'id',
 					'title',
 					'description',

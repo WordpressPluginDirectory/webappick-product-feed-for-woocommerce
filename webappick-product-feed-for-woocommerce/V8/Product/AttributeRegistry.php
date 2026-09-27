@@ -185,15 +185,24 @@ class AttributeRegistry {
 			$attributes[] = $cat_mapping;
 		}
 
-		// ACF fields — Pro-only in the attribute picker. Existing feeds keep
-		// working regardless: the `acf_fields_` prefix + value resolution live
-		// in Free (CustomFieldResolver), so a saved mapping still resolves
-		// without Pro; only LISTING ACF fields to map is gated. Pro unlocks
-		// `acf_attributes` via FeatureGate. @gate acf_attributes.
+		// ACF fields — Pro picker group. The `acf_fields_` value resolution is
+		// the Pro CustomFieldPrefixResolver engine too (CBT-652); a saved
+		// mapping ships '' without Pro. @gate acf_attributes.
 		if ( FeatureGate::has( 'acf_attributes' ) ) {
 			$acf = $this->get_acf_attributes();
 			if ( ! empty( $acf['options'] ) ) {
 				$attributes[] = $acf;
+			}
+		}
+
+		// Toolset Types fields — same split as ACF: listing and the
+		// toolset_fields_ resolution are Pro (CBT-652). Toolset-registered
+		// product taxonomies flow through get_taxonomy_dropdown() with no
+		// gate. @gate toolset_attributes.
+		if ( FeatureGate::has( 'toolset_attributes' ) ) {
+			$toolset = $this->get_toolset_attributes();
+			if ( ! empty( $toolset['options'] ) ) {
+				$attributes[] = $toolset;
 			}
 		}
 
@@ -547,10 +556,36 @@ class AttributeRegistry {
 		// so these identifier options used to silently disappear.
 		$custom_fields = CustomFieldHelper::get_fields();
 		if ( is_array( $custom_fields ) && ! empty( $custom_fields ) ) {
+			// Settings > Product attributes toggles hide disabled fields from
+			// the picker (V5 Woo_Feed_Custom_Identifier_Filter parity, CBT-593):
+			// a key PRESENT in the stored map must read 'enable' (or a truthy
+			// V5 edge value); a key MISSING from the map falls back to the
+			// definition's default_enabled flag, so fields added by third-party
+			// filters keep appearing. Resolution of already-mapped keys is
+			// deliberately untouched — disabling a field hides it from NEW
+			// picks only and never blanks existing feeds.
+			$settings   = get_option( 'woo_feed_settings' );
+			$identifier = isset( $settings['woo_feed_identifier'] ) && is_array( $settings['woo_feed_identifier'] ) ? $settings['woo_feed_identifier'] : array();
+			$taxonomy   = isset( $settings['woo_feed_taxonomy'] ) && is_array( $settings['woo_feed_taxonomy'] ) ? $settings['woo_feed_taxonomy'] : array();
+
 			foreach ( $custom_fields as $key => $value ) {
-				if ( is_array( $value ) && isset( $value[0] ) ) {
-					$options[ 'woo_feed_identifier_' . sanitize_text_field( $key ) ] = sanitize_text_field( $value[0] );
+				if ( ! is_array( $value ) || ! isset( $value[0] ) ) {
+					continue;
 				}
+
+				$map = ( isset( $value[2] ) && 'taxonomy' === $value[2] ) ? $taxonomy : $identifier;
+				if ( array_key_exists( $key, $map ) ) {
+					$toggle  = $map[ $key ];
+					$enabled = ( 'enable' === $toggle || true === $toggle || 1 === $toggle || '1' === $toggle );
+				} else {
+					$enabled = ! empty( $value[1] );
+				}
+
+				if ( ! $enabled ) {
+					continue;
+				}
+
+				$options[ 'woo_feed_identifier_' . sanitize_text_field( $key ) ] = sanitize_text_field( $value[0] );
 			}
 		}
 
@@ -700,7 +735,7 @@ class AttributeRegistry {
 			    meta_key LIKE 'attribute_%'
 			    AND meta_key NOT LIKE 'attribute_pa_%'
 			)";
-		$local_attrs = $wpdb->get_col( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- $sql is a fixed literal built only from $wpdb table properties, so there is nothing to prepare. Admin-only dropdown catalog: there is no WP API for "distinct meta keys in use", and the result is served from a 5-minute transient by ProductEndpoint::get_mapping_attributes(), so this runs at most once per cache window and never on the feed-generation path.
+		$local_attrs = $wpdb->get_col( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is a fixed literal built only from $wpdb table properties, so there is nothing to prepare. Admin-only dropdown catalog: there is no WP API for "distinct meta keys in use", and the result is served from a 5-minute transient by ProductEndpoint::get_mapping_attributes(), so this runs at most once per cache window and never on the feed-generation path.
 
 		foreach ( $local_attrs as $attr ) {
 			$clean                                      = str_replace( 'attribute_', '', $attr );
@@ -846,6 +881,45 @@ class AttributeRegistry {
 	}
 
 	/**
+	 * Toolset Types field attributes (`toolset_fields_{slug}`).
+	 *
+	 * Field definitions live in the `wpcf-fields` option (Toolset stores it
+	 * as a serialized string inside the option value on some versions, hence
+	 * the double unserialize guard). Listing is Pro-gated by the caller;
+	 * resolution stays in Free (CustomFieldResolver::resolve_toolset()).
+	 *
+	 * @since 8.0.19
+	 * @return array
+	 */
+	private function get_toolset_attributes(): array {
+		$options = array();
+
+		if ( function_exists( 'types_render_field' ) || defined( 'WPCF_VERSION' ) || defined( 'TYPES_VERSION' ) ) {
+			$fields = get_option( 'wpcf-fields', array() );
+			if ( is_string( $fields ) ) {
+				$fields = maybe_unserialize( $fields );
+			}
+			if ( is_array( $fields ) ) {
+				foreach ( $fields as $slug => $field ) {
+					if ( '' === (string) $slug ) {
+						continue;
+					}
+					$label = is_array( $field ) && ! empty( $field['name'] )
+						? (string) $field['name']
+						: (string) $slug;
+
+					$options[ 'toolset_fields_' . $slug ] = $label;
+				}
+			}
+		}
+
+		return array(
+			'optionGroup' => __( 'Toolset Types Fields', 'woo-feed' ),
+			'options'     => $options,
+		);
+	}
+
+	/**
 	 * Custom fields & post meta attributes.
 	 *
 	 * @since 8.0.0
@@ -945,7 +1019,7 @@ class AttributeRegistry {
 			$pattern_sql
 		);
 
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- $sql is assembled above with sprintf() from values already run through $wpdb->prepare()/esc_sql(). Admin-only dropdown catalog: there is no WP API for "distinct meta keys in use", and the result is served from a 5-minute transient by ProductEndpoint::get_mapping_attributes(), so this runs at most once per cache window and never on the feed-generation path.
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, PluginCheck.Security.DirectDB.UnescapedDBParameter -- $sql is assembled above with sprintf() from values already run through $wpdb->prepare()/esc_sql(). Admin-only dropdown catalog: there is no WP API for "distinct meta keys in use", and the result is served from a 5-minute transient by ProductEndpoint::get_mapping_attributes(), so this runs at most once per cache window and never on the feed-generation path.
 		$data = $wpdb->get_results( $sql );
 
 		if ( ! empty( $data ) ) {
@@ -977,7 +1051,11 @@ class AttributeRegistry {
 		return array(
 			'optionGroup' => __( 'WPML Attributes', 'woo-feed' ),
 			'options'     => array(
-				'parent_id' => __( 'Parent Product ID', 'woo-feed' ),
+				'parent_id'           => __( 'Parent Product ID', 'woo-feed' ),
+				// V5's parent_id SEMANTICS under an honest name (#69001):
+				// the default-language counterpart's post id — what Meta
+				// language-override feeds must carry as g:id.
+				'default_language_id' => __( 'Default Language ID', 'woo-feed' ),
 			),
 		);
 	}

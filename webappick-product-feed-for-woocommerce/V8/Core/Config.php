@@ -13,6 +13,8 @@
 
 namespace CTXFeed\V8\Core;
 
+use CTXFeed\V8\Utility\Sanitizer;
+
 // Exit if accessed directly.
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
@@ -81,21 +83,21 @@ class Config {
 			return null;
 		}
 
-		$attributes = (array) ( $this->rules['attributes'] ?? array() );
-		$types      = (array) ( $this->rules['type'] ?? array() );
-		$defaults   = (array) ( $this->rules['default'] ?? array() );
-
 		$kept    = array();
 		$dropped = false;
 
 		foreach ( $mattributes as $index => $mattr ) {
 			$mattr_empty = '' === trim( (string) $mattr );
-			$wc_empty    = '' === trim( (string) ( $attributes[ $index ] ?? '' ) );
-			$type        = (string) ( $types[ $index ] ?? 'attribute' );
-			$has_default = '' !== trim( (string) ( $defaults[ $index ] ?? '' ) );
-			$static_row  = in_array( $type, array( 'pattern', 'text' ), true ) && $has_default;
 
-			if ( $mattr_empty && $wc_empty && ! $static_row ) {
+			// BUG-0083 (widens the BUG-0061 both-sides-empty rule): a row with
+			// NO channel attribute can never render a valid element — XMLTemplate
+			// emits a no-tag-name `<></>`, whatever the source side holds (live
+			// repro shipped `<>title</>` into a customer-shaped feed). Save-time
+			// validation now blocks creating such rows; this drop protects the
+			// renderer from configs saved before 8.0.19. Rows WITH a channel
+			// attribute but an empty resolved value are untouched — empty
+			// elements render intentionally (owner rule).
+			if ( $mattr_empty ) {
 				$dropped = true;
 				continue;
 			}
@@ -355,8 +357,14 @@ class Config {
 	 * @return array Default values.
 	 */
 	public function get_default(): array {
-
-		return $this->filter_mapping_row( (array) ( $this->rules['default'] ?? array() ) );
+		// Feeds saved on 8.0.16–8.0.23 stored `>` / `&` as HTML entities
+		// (CBT-607). Restore the typed characters for EVERY consumer of the
+		// column (repository fallbacks, review resolver, reporter) so those
+		// feeds heal at generation with no option rewrite.
+		return array_map(
+			array( Sanitizer::class, 'restore_text' ),
+			$this->filter_mapping_row( (array) ( $this->rules['default'] ?? array() ) )
+		);
 	}
 
 	/**

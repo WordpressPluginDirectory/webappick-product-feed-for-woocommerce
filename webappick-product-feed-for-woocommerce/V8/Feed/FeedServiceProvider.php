@@ -208,7 +208,13 @@ class FeedServiceProvider extends ServiceProvider {
 			// and self-gates (provider=skroutz + variation_* mapped), so it costs
 			// nothing for any other feed.
 			$generator->set_variations_builder(
-				new \CTXFeed\V8\Product\SkroutzVariationsBuilder( $product_repo )
+				new \CTXFeed\V8\Product\SkroutzVariationsBuilder(
+					$product_repo,
+					// The per-child stock gate is the Pro StockFilter, bound as
+					// `filter.stock` by Pro\Engine\ProductSelection (CBT-650);
+					// free without Pro keeps every child.
+					$container->has( 'filter.stock' ) ? $container->resolve( 'filter.stock' ) : null
+				)
 			);
 
 			// Wire Action Scheduler callbacks with dependencies. @implements FEED-FRD-7.2.
@@ -222,6 +228,17 @@ class FeedServiceProvider extends ServiceProvider {
 
 		$this->register_recurring_backfill( $scheduler, $manager );
 		$this->register_legacy_temp_purge( $filesystem );
+
+		// One-time upgrade sweep (CBT-594): clear the invisible brand fallback
+		// the 8.0.17–8.0.22 template defaults stored on Attribute rows. Fired
+		// by CTXFeed_Installer::check_version on the first request after an
+		// update; BrandDefaultHeal flags itself done so later updates skip it.
+		add_action(
+			'woo_feed_plugin_updated',
+			static function () use ( $manager ) {
+				( new BrandDefaultHeal() )->run( $manager );
+			}
+		);
 	}
 
 	/**

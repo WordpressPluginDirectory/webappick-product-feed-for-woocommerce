@@ -2,6 +2,24 @@
 /**
  * TaxonomyResolver — Resolves product taxonomy values.
  *
+ * @package    CTXFeed
+ * @subpackage V8/Product
+ * @since      8.0.0
+ * @implements PROD-FRD-5.1, PROD-FRD-5.2, PROD-FRD-10.13
+ */
+
+namespace CTXFeed\V8\Product;
+
+use CTXFeed\V8\Core\Config;
+
+// Exit if accessed directly.
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+/**
+ * Taxonomy resolver.
+ *
  * Handles the 7 core category attributes with V5 semantic parity:
  *   • categories           — directly-assigned terms, parent-ASC sort,
  *                            joined with the " > " separator.
@@ -38,24 +56,6 @@
  *      and re-implement in 5 lines. Automatic detection was a V8
  *      divergence that made "primary vs child" collapse to the same
  *      term whenever Yoast was installed.
- *
- * @package    CTXFeed
- * @subpackage V8/Product
- * @since      8.0.0
- * @implements PROD-FRD-5.1, PROD-FRD-5.2, PROD-FRD-10.13
- */
-
-namespace CTXFeed\V8\Product;
-
-use CTXFeed\V8\Core\Config;
-
-// Exit if accessed directly.
-if ( ! defined( 'ABSPATH' ) ) {
-	exit;
-}
-
-/**
- * Taxonomy resolver.
  *
  * @since 8.0.0
  */
@@ -496,6 +496,24 @@ class TaxonomyResolver {
 		foreach ( $terms as $term ) {
 			$names[] = $term->name;
 		}
+
+		// A variable parent's global attribute (pa_*) may be narrowed to the
+		// options that still have a sellable variation — same seam as the
+		// product-attribute path (CBT-639).
+		if ( 0 === strpos( $taxonomy, 'pa_' ) && $product->is_type( 'variable' ) ) {
+			$items = array();
+			foreach ( $terms as $term ) {
+				$items[] = array(
+					'name' => $term->name,
+					'slug' => $term->slug,
+				);
+			}
+			$kept = AttributeResolver::filter_parent_items( $items, $product, $taxonomy, $config );
+			if ( null !== $kept ) {
+				$names = $kept;
+			}
+		}
+
 		return implode( $separator, $names );
 	}
 

@@ -38,32 +38,44 @@ class SupportEndpoint extends RestController {
 			$this->namespace,
 			'/support/contact',
 			array(
-				'methods'             => \WP_REST_Server::CREATABLE,
-				'callback'            => array( $this, 'send_contact' ),
-				'permission_callback' => array( $this, 'permission_check' ),
-				'args'                => array(
-					'name'    => array(
-						'required'          => true,
-						'type'              => 'string',
-						'sanitize_callback' => 'sanitize_text_field',
-					),
-					'email'   => array(
-						'required'          => true,
-						'type'              => 'string',
-						'sanitize_callback' => 'sanitize_email',
-					),
-					'message' => array(
-						'required'          => true,
-						'type'              => 'string',
-						'sanitize_callback' => 'sanitize_textarea_field',
-					),
-					'feed'    => array(
-						'required'          => false,
-						'default'           => '',
-						'type'              => 'string',
-						'sanitize_callback' => 'sanitize_text_field',
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $this, 'send_contact' ),
+					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(
+						'name'    => array(
+							'required'          => true,
+							'type'              => 'string',
+							'validate_callback' => array( $this, 'validate_non_blank_string' ),
+							'sanitize_callback' => 'sanitize_text_field',
+						),
+						'email'   => array(
+							'required'          => true,
+							'type'              => 'string',
+							'format'            => 'email',
+							'validate_callback' => 'rest_validate_request_arg',
+							'sanitize_callback' => 'sanitize_email',
+						),
+						// maxLength 2000 matches the UI limit; over-long input
+						// now 400s instead of being silently truncated — a cut
+						// support message lost its tail with no warning (CBT-588).
+						'message' => array(
+							'required'          => true,
+							'type'              => 'string',
+							'maxLength'         => 2000,
+							'validate_callback' => array( $this, 'validate_contact_message' ),
+							'sanitize_callback' => 'sanitize_textarea_field',
+						),
+						'feed'    => array(
+							'required'          => false,
+							'default'           => '',
+							'type'              => 'string',
+							'sanitize_callback' => 'sanitize_text_field',
+							'description'       => __( "'', a feed id, or 'all' — selects which feed's diagnostics ride along.", 'woo-feed' ),
+						),
 					),
 				),
+				'schema' => array( $this, 'get_contact_response_schema' ),
 			)
 		);
 
@@ -71,22 +83,97 @@ class SupportEndpoint extends RestController {
 			$this->namespace,
 			'/support/discount',
 			array(
-				'methods'             => \WP_REST_Server::CREATABLE,
-				'callback'            => array( $this, 'send_discount_claim' ),
-				'permission_callback' => array( $this, 'permission_check' ),
-				'args'                => array(
-					'handle' => array(
-						'required'          => true,
-						'type'              => 'string',
-						'sanitize_callback' => 'sanitize_text_field',
-					),
-					'email'  => array(
-						'required'          => true,
-						'type'              => 'string',
-						'sanitize_callback' => 'sanitize_email',
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $this, 'send_discount_claim' ),
+					'permission_callback' => array( $this, 'permission_check' ),
+					'args'                => array(
+						'handle' => array(
+							'required'          => true,
+							'type'              => 'string',
+							'validate_callback' => array( $this, 'validate_non_blank_string' ),
+							'sanitize_callback' => 'sanitize_text_field',
+							'description'       => __( 'WordPress.org handle or profile URL.', 'woo-feed' ),
+						),
+						'email'  => array(
+							'required'          => true,
+							'type'              => 'string',
+							'format'            => 'email',
+							'validate_callback' => 'rest_validate_request_arg',
+							'sanitize_callback' => 'sanitize_email',
+						),
 					),
 				),
+				'schema' => array( $this, 'get_message_only_response_schema' ),
 			)
+		);
+	}
+
+	/**
+	 * Validate the contact message: non-blank AND within the schema's
+	 * maxLength (the custom callback replaces core's default, so it must
+	 * run the schema check itself — CBT-588).
+	 *
+	 * @since 8.0.22
+	 *
+	 * @param mixed            $value   Parameter value.
+	 * @param \WP_REST_Request $request REST request object.
+	 * @param string           $param   Parameter name.
+	 * @return true|\WP_Error
+	 */
+	public function validate_contact_message( $value, $request, $param ) {
+		$schema_check = rest_validate_request_arg( $value, $request, $param );
+		if ( true !== $schema_check ) {
+			return $schema_check;
+		}
+
+		return $this->validate_non_blank_string( $value, $request, $param );
+	}
+
+	/**
+	 * Response schema for POST /support/contact (CBT-588).
+	 *
+	 * @since 8.0.22
+	 *
+	 * @return array
+	 */
+	public function get_contact_response_schema(): array {
+		return $this->message_only_schema( 'ctxfeed-support-contact' );
+	}
+
+	/**
+	 * Response schema for POST /support/discount (CBT-588).
+	 *
+	 * @since 8.0.22
+	 *
+	 * @return array
+	 */
+	public function get_message_only_response_schema(): array {
+		return $this->message_only_schema( 'ctxfeed-support-discount' );
+	}
+
+	/**
+	 * The {success, data:{message}} envelope schema both support routes share.
+	 *
+	 * @since 8.0.22
+	 *
+	 * @param string $title Schema title.
+	 * @return array
+	 */
+	private function message_only_schema( string $title ): array {
+		return array(
+			'$schema'    => 'http://json-schema.org/draft-04/schema#',
+			'title'      => $title,
+			'type'       => 'object',
+			'properties' => array(
+				'success' => array( 'type' => 'boolean' ),
+				'data'    => array(
+					'type'       => 'object',
+					'properties' => array(
+						'message' => array( 'type' => 'string' ),
+					),
+				),
+			),
 		);
 	}
 
@@ -135,19 +222,48 @@ class SupportEndpoint extends RestController {
 		// Keep parity with the UI's 2000-character limit.
 		$message = mb_substr( $message, 0, 2000 );
 
-		// The user's message first, then the diagnostics support needs to act
-		// without a follow-up: the system status, and — when the user picked a
-		// feed (optional) — that feed's log.
+		// Remove PREVIOUS tickets' temp diagnostics (bundle dirs + staged
+		// manual uploads share the ctxfeed-support- prefix). Cleanup is
+		// deferred to here — not done right after wp_mail() — so queueing
+		// mailers can still read the files at actual send time (#69086).
+		$this->sweep_stale_temp();
+
+		// The user's message plus a SHORT inline status block (support scans
+		// versions from the ticket preview without opening attachments). The
+		// heavy diagnostics ride as files instead of raw text in the body:
+		// system-status.txt — the FULL System status page (every section)
+		// system-status.log — the logs (selected feed's log, else the
+		// System status → Logs tab bundle)
+		// feed-config.txt   — the selected feed's configuration (redacted)
+		// plus the generated feed file(s) for the selected feed (BUG-0064)
+		// and any files the user attached manually in the form.
 		$body  = "From: {$name} <{$email}>\n";
 		$body .= 'Site: ' . home_url() . "\n\n";
 		$body .= $message . "\n\n";
-		$body .= "--- System status ---\n" . $this->system_report() . "\n\n";
-		$body .= "--- Feed log ---\n" . $this->feed_log( $feed );
+		$body .= "--- System status (summary) ---\n" . $this->system_report() . "\n\n";
 
-		// BUG-0064: attach the ACTUAL generated feed file for the selected feed
-		// (none when the optional feed picker is left unset), plus any files the
-		// user attached manually in the form. wp_mail takes real file paths.
-		$attachments = $this->feed_files( $feed );
+		$bundle      = $this->diagnostic_bundle( $feed );
+		$attachments = array_merge( $bundle['paths'], $this->feed_files( $feed ) );
+
+		$body .= 'Attached: ' . implode( ', ', array_map( 'basename', $attachments ) ) . "\n";
+
+		// Inline copy of the feed configuration — the single most important
+		// diagnostic. Some hosts' mailers lose attachments entirely
+		// (queueing SMTP plugins send AFTER temp files used to be deleted;
+		// others strip attachments outright) — a ticket then arrived with
+		// only the "Attached:" line and nothing to diagnose from (#69086).
+		// The config must survive in the body itself; capped so an 'all'
+		// dump can't balloon the email.
+		$config_text = $this->feed_config_text( $feed, false );
+		if ( '' !== $config_text ) {
+			$body .= "\n--- Feed configuration (inline copy of feed-config.txt) ---\n";
+			$body .= "(compact JSON - the readable pretty-printed version is in the feed-config.txt attachment)\n";
+			$body .= mb_substr( $config_text, 0, 15000 );
+			if ( mb_strlen( $config_text ) > 15000 ) {
+				$body .= "\n[truncated - full copy in the feed-config.txt attachment]";
+			}
+			$body .= "\n";
+		}
 
 		$manual      = $this->manual_attachments( $request );
 		$attachments = array_merge( $attachments, $manual );
@@ -164,12 +280,14 @@ class SupportEndpoint extends RestController {
 			$attachments
 		);
 
-		// Clean up the temp copies of the manual uploads, if any.
-		foreach ( $manual as $path ) {
-			if ( file_exists( $path ) ) {
-				wp_delete_file( $path );
-			}
-		}
+		// The temp copies are deliberately NOT deleted here (#69086): on
+		// sites with a QUEUEING mailer (WP Mail SMTP queue, FluentSMTP
+		// email log/queue, SES offloaders), wp_mail() returns after merely
+		// queueing — the real send happens minutes later on cron, and
+		// deleting the files now meant the queued send attached nothing.
+		// Leftovers are removed by sweep_stale_temp() (see send_ticket's
+		// opening sweep): anything under the ctxfeed-support- temp prefix
+		// older than an hour goes on the next ticket send.
 
 		if ( ! $sent ) {
 			return $this->error(
@@ -261,6 +379,185 @@ class SupportEndpoint extends RestController {
 		);
 
 		return implode( "\n", $lines );
+	}
+
+	/**
+	 * Delete stale ctxfeed-support-* temp entries (bundle directories and
+	 * staged manual-upload files) older than the given age.
+	 *
+	 * Cleanup is deferred (#69086): deleting right after wp_mail() broke
+	 * attachments on every site whose mailer QUEUES sends — wp_mail()
+	 * returns on enqueue, the real send reads the files later. An hour is
+	 * comfortably past any sane mail-queue latency, and the OS temp dir is
+	 * the fallback janitor for a site that never sends another ticket.
+	 *
+	 * @since 8.0.18
+	 *
+	 * @param int $max_age Seconds an entry may live. Default one hour.
+	 * @return int Entries removed.
+	 */
+	private function sweep_stale_temp( int $max_age = HOUR_IN_SECONDS ): int {
+		$entries = glob( trailingslashit( get_temp_dir() ) . 'ctxfeed-support-*' );
+		if ( ! is_array( $entries ) ) {
+			return 0;
+		}
+
+		$removed = 0;
+		$cutoff  = time() - $max_age;
+
+		foreach ( $entries as $entry ) {
+			$mtime = @filemtime( $entry ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, Generic.PHP.NoSilencedErrors.Forbidden -- A raced-away temp entry must not error the ticket; false falls through to the skip below.
+			if ( false === $mtime || $mtime > $cutoff ) {
+				continue;
+			}
+
+			if ( is_dir( $entry ) ) {
+				foreach ( (array) glob( trailingslashit( $entry ) . '*' ) as $inner ) {
+					wp_delete_file( $inner );
+				}
+				@rmdir( $entry ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir, WordPressVIPMinimum.Functions.RestrictedFunctions.directory_rmdir, WordPress.PHP.NoSilencedErrors.Discouraged, Generic.PHP.NoSilencedErrors.Forbidden -- Best-effort removal of an emptied stale temp dir; a leftover must not fail the ticket.
+				++$removed;
+				continue;
+			}
+
+			wp_delete_file( $entry );
+			++$removed;
+		}
+
+		return $removed;
+	}
+
+	/**
+	 * Write the diagnostic attachment files for a support ticket.
+	 *
+	 * Creates a unique temp directory holding (exact names, per the support
+	 * workflow):
+	 *   - system-status.txt — the FULL System status page text
+	 *   - system-status.log — the selected feed's log, or (no feed picked)
+	 *     the System status → Logs tab bundle
+	 *   - feed-config.txt   — the selected feed's stored configuration as
+	 *     pretty JSON, credentials redacted ('all' dumps every feed)
+	 *
+	 * The caller attaches the paths to wp_mail(); cleanup is DEFERRED to
+	 * sweep_stale_temp() on a later ticket send, never immediate (#69086 —
+	 * queueing mailers read the files after wp_mail() returns). File-write
+	 * failures degrade gracefully — a missing attachment must never block
+	 * the ticket.
+	 *
+	 * @since 8.0.14
+	 *
+	 * @param string $feed '', 'all', or a feed id.
+	 * @return array{dir:string, paths:string[]}
+	 */
+	private function diagnostic_bundle( string $feed ): array {
+		$dir = trailingslashit( get_temp_dir() ) . 'ctxfeed-support-' . wp_generate_password( 8, false ) . '/';
+		if ( ! wp_mkdir_p( $dir ) ) {
+			return array(
+				'dir'   => '',
+				'paths' => array(),
+			);
+		}
+
+		$status = new StatusEndpoint();
+		$files  = array(
+			'system-status.txt' => $status->full_status_text(),
+			'system-status.log' => '' === $feed ? $status->logs_text() : $this->feed_log( $feed ),
+		);
+
+		$config_text = $this->feed_config_text( $feed );
+		if ( '' !== $config_text ) {
+			$files['feed-config.txt'] = $config_text;
+		}
+
+		$paths = array();
+		foreach ( $files as $filename => $content ) {
+			$path = $dir . $filename;
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_file_put_contents -- Writes this request's own temp attachment files; removed later by sweep_stale_temp() (#69086 — queueing mailers read them after wp_mail returns).
+			if ( false !== file_put_contents( $path, (string) $content ) ) {
+				$paths[] = $path;
+			}
+		}
+
+		return array(
+			'dir'   => $dir,
+			'paths' => $paths,
+		);
+	}
+
+	/**
+	 * The selected feed's stored configuration as JSON, credentials
+	 * redacted. Empty string when no feed is selected (no file is written).
+	 *
+	 * @since 8.0.14
+	 *
+	 * @param string $feed   '', 'all', or a feed id.
+	 * @param bool   $pretty Pretty-print (attachment default); false yields
+	 *                       compact single-line JSON for the inline body copy (CBT-589).
+	 * @return string
+	 */
+	private function feed_config_text( string $feed, bool $pretty = true ): string {
+		if ( '' === $feed ) {
+			return '';
+		}
+
+		$slugs = array();
+		if ( 'all' === $feed ) {
+			global $wpdb;
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- Feed configs live in wp_options under wf_feed_ (shared with V5); get_option cannot enumerate by prefix. Admin-only, on demand.
+			$names = $wpdb->get_col( "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE 'wf\_feed\_%'" );
+			foreach ( (array) $names as $option_name ) {
+				$slugs[] = str_replace( 'wf_feed_', '', (string) $option_name );
+			}
+		} else {
+			$slug = $this->feed_slug( $feed );
+			if ( '' !== $slug ) {
+				$slugs[] = $slug;
+			}
+		}
+
+		$out = '';
+		foreach ( $slugs as $slug ) {
+			$data = get_option( 'wf_feed_' . $slug );
+			if ( is_string( $data ) && function_exists( 'maybe_unserialize' ) ) {
+				$data = maybe_unserialize( $data );
+			}
+			if ( ! is_array( $data ) ) {
+				continue;
+			}
+
+			$out .= "===== Feed: {$slug} =====\n";
+			// The attachment stays human-readable; the inline body copy is
+			// compact single-line JSON so the #69086 insurance stops
+			// bloating every ticket (CBT-589) — same data either way.
+			$flags = $pretty ? JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES : JSON_UNESCAPED_SLASHES;
+			$out  .= (string) wp_json_encode( $this->redact_credentials( $data ), $flags );
+			$out  .= "\n\n";
+		}
+
+		return trim( $out );
+	}
+
+	/**
+	 * Recursively blank credential-carrying keys before a config leaves the
+	 * site (FTP/SFTP passwords live inside feedrules).
+	 *
+	 * @since 8.0.14
+	 *
+	 * @param array $data Config array.
+	 * @return array
+	 */
+	private function redact_credentials( array $data ): array {
+		foreach ( $data as $key => $value ) {
+			if ( is_array( $value ) ) {
+				$data[ $key ] = $this->redact_credentials( $value );
+				continue;
+			}
+			if ( is_string( $key ) && preg_match( '/password|secret|api_key|apikey/i', $key ) && '' !== (string) $value ) {
+				$data[ $key ] = '(redacted)';
+			}
+		}
+
+		return $data;
 	}
 
 	/**
@@ -374,8 +671,6 @@ class SupportEndpoint extends RestController {
 		if ( empty( $upload['basedir'] ) ) {
 			return array();
 		}
-		$base = trailingslashit( $upload['basedir'] ) . 'woo-feed/';
-
 		$slugs = array();
 		if ( 'all' === $feed ) {
 			global $wpdb;
@@ -396,17 +691,24 @@ class SupportEndpoint extends RestController {
 		$total     = 0;
 		$max_total = 15 * 1024 * 1024; // 15 MB across all attached feed files.
 
+		$filesystem = new \CTXFeed\V8\Utility\Filesystem();
+
 		foreach ( $slugs as $slug ) {
 			$config   = get_option( 'wf_feed_' . $slug );
 			$rules    = ( is_array( $config ) && isset( $config['feedrules'] ) && is_array( $config['feedrules'] ) ) ? $config['feedrules'] : array();
-			$provider = isset( $rules['provider'] ) ? sanitize_file_name( (string) $rules['provider'] ) : '';
-			$ext      = isset( $rules['feedType'] ) ? strtolower( sanitize_file_name( (string) $rules['feedType'] ) ) : 'xml';
+			$provider = isset( $rules['provider'] ) ? (string) $rules['provider'] : '';
+			$ext      = isset( $rules['feedType'] ) ? strtolower( (string) $rules['feedType'] ) : 'xml';
 
 			if ( '' === $provider ) {
 				continue;
 			}
 
-			$path = $base . $provider . '/' . $ext . '/' . sanitize_file_name( $slug ) . '.' . $ext;
+			// Filesystem::get_feed_path is the single path authority — this
+			// used to MIRROR it with its own sanitize_file_name calls, and
+			// recent WP's 'tsv'→'unnamed-file.tsv' rewriting (#68989) made
+			// the mirror point at the forked directory, silently dropping
+			// the feed file from support tickets.
+			$path = $filesystem->get_feed_path( $slug, $ext, $provider );
 			if ( ! file_exists( $path ) ) {
 				continue;
 			}
@@ -428,8 +730,8 @@ class SupportEndpoint extends RestController {
 	 *
 	 * Accepts one file (legacy `attachment`) or several (`attachment[]`). Each
 	 * valid upload is moved to a temp file that preserves its original name
-	 * (wp_mail names an attachment from its path basename); the caller deletes
-	 * them after sending. Individual files are skipped when errored, empty, or
+	 * (wp_mail names an attachment from its path basename); cleanup is
+	 * deferred to sweep_stale_temp() (#69086). Individual files are skipped when errored, empty, or
 	 * over 10 MB; the set is bounded by a max count and a total-size budget so
 	 * the email can't balloon.
 	 *
@@ -487,6 +789,7 @@ class SupportEndpoint extends RestController {
 			}
 
 			$dest = trailingslashit( get_temp_dir() ) . 'ctxfeed-support-' . wp_generate_password( 8, false ) . '-' . $safe_name;
+			// phpcs:ignore Generic.PHP.ForbiddenFunctions.Found, WordPressVIPMinimum.Functions.RestrictedFunctions.move_uploaded_file_move_uploaded_file -- Stages an admin-submitted support-ticket attachment from PHP's upload tmp into get_temp_dir() under a random name; move_uploaded_file() atomically validates the file came from THIS request's upload, size/type are checked above, and the copy is deleted after the ticket sends.
 			if ( ! move_uploaded_file( $tmp, $dest ) ) {
 				continue;
 			}

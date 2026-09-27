@@ -170,21 +170,81 @@ class ProductQuery {
 		);
 
 		// Product type filter.
-		$product_types = $config->get( 'product_types', array( 'simple', 'variable', 'grouped', 'external' ) );
+		$product_types = $config->get( 'product_types', ProductTypeSupport::FREE_TYPES );
 		$args['type']  = $product_types;
 
-		// Category filter is applied per-product in CategoryFilter — it has
-		// full include/exclude mode support via filter_mode. Keeping the
-		// category filter out of the query avoids double-filtering and lets
-		// exclude-mode work correctly (WC_Product_Query's `category` arg is
-		// include-only).
+		// Category push-down seams (CBT-650). The category filter is a
+		// Filters-tab (Pro) feature, so the query-level cuts that used to live
+		// here — include mode via prune_to_included_categories() (8.0.14) and
+		// exclude mode via a NOT IN tax_query (8.0.16) — moved to the Pro
+		// engine (Pro\Engine\Filter\CategoryQueryPushdown). Free keeps two
+		// generic seams: a list of term_taxonomy_ids to cut INSIDE the query
+		// and a hook on the id set BEFORE variation expansion. Both stay
+		// superset-safe: the per-product CategoryFilter (Pro) remains the
+		// authority in the loop. With nothing hooked the catalog query runs
+		// exactly as V5 free did.
 
 		// Allow V8 and compat plugins to modify query args.
 		// @hook ctxfeed_product_query_args.
 		$args = apply_filters( 'ctxfeed_product_query_args', $args, $config );
 
-		$query       = new \WC_Product_Query( $args );
-		$product_ids = $query->get_products();
+		/**
+		 * Filter the term_taxonomy_ids the product query cuts with a NOT IN
+		 * `product_cat` tax_query (`include_children` OFF — has_term()'s
+		 * direct-assignment semantics; the tax_query default would also
+		 * exclude child-category products the loop would KEEP). Resolved
+		 * AFTER the args filter so multilingual shims have already pinned
+		 * the query language. Empty = no clause injected.
+		 *
+		 * @since 8.0.27
+		 *
+		 * @param int[]  $tt_ids term_taxonomy_ids to exclude.
+		 * @param Config $config Feed configuration.
+		 */
+		$exclude_tt_ids = array_values( array_filter( array_map( 'intval', (array) apply_filters( 'ctxfeed_product_query_exclude_term_taxonomy_ids', array(), $config ) ) ) );
+		$inject_exclude = null;
+		if ( ! empty( $exclude_tt_ids ) ) {
+			$inject_exclude = static function ( $wp_query_args ) use ( $exclude_tt_ids ) {
+				if ( ! isset( $wp_query_args['tax_query'] ) || ! is_array( $wp_query_args['tax_query'] ) ) {
+					$wp_query_args['tax_query'] = array(); // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_tax_query -- Same query WooCommerce's own data store builds; the NOT IN subquery replaces warming/iterating the full catalog per batch.
+				}
+				$wp_query_args['tax_query'][] = array(
+					'taxonomy'         => 'product_cat',
+					'field'            => 'term_taxonomy_id',
+					'terms'            => $exclude_tt_ids,
+					'operator'         => 'NOT IN',
+					'include_children' => false,
+				);
+				return $wp_query_args;
+			};
+			add_filter( 'woocommerce_product_data_store_cpt_get_products_query', $inject_exclude );
+		}
+
+		try {
+			$query       = new \WC_Product_Query( $args );
+			$product_ids = $query->get_products();
+		} finally {
+			// NEVER leak the closure into unrelated product queries — remove
+			// it even when the query throws.
+			if ( null !== $inject_exclude ) {
+				remove_filter( 'woocommerce_product_data_store_cpt_get_products_query', $inject_exclude );
+			}
+		}
+
+		/**
+		 * Filter the queried product ids BEFORE variation expansion and
+		 * per-product filtering. The Pro include-mode category push-down
+		 * intersects them with the selected categories here (#68989), so a
+		 * 5-product category feed on a 500K-product store doesn't load the
+		 * whole catalog. Listeners must only REMOVE ids the per-product
+		 * filters would remove anyway (superset-safe).
+		 *
+		 * @since 8.0.27
+		 *
+		 * @param int[]  $product_ids Queried ids (catalog order).
+		 * @param Config $config      Feed configuration.
+		 */
+		$product_ids = array_values( (array) apply_filters( 'ctxfeed_product_query_ids_before_expansion', $product_ids, $config ) );
 
 		// Expand variations if configured.
 		// @implements PROD-FRD-3.2.
@@ -425,9 +485,10 @@ class ProductQuery {
 	 * parents in `$parent_ids` simply have no `product_variation` children and
 	 * contribute nothing, so the caller does not need to know each product's
 	 * type in advance. The query mirrors WooCommerce's own variable data store
-	 * (`read_children`): `post_status` publish + private, ordered by
-	 * `menu_order` then `ID`, so the resulting child order matches
-	 * `WC_Product::get_children()` for output parity.
+	 * (`read_children`) in its ordering — `menu_order` then `ID`, so the
+	 * resulting child order matches `WC_Product::get_children()` for output
+	 * parity — but NOT in its status set: children are constrained to the
+	 * feed's own resolved post_status (see the comment in the body, #68878).
 	 *
 	 * The parent IDs are chunked so a large catalog never builds a single
 	 * multi-thousand-item `IN ()` clause.
@@ -435,14 +496,33 @@ class ProductQuery {
 	 * @since 8.0.0
 	 *
 	 * @param int[]  $parent_ids Product IDs to fetch variations for.
-	 * @param Config $config     Feed configuration (reserved for hooks).
+	 * @param Config $config     Feed configuration (status filter + hooks).
 	 *
 	 * @return array<int,int[]> Map of parent ID => ordered child variation IDs.
 	 */
-	private function fetch_variation_map( array $parent_ids, Config $config ): array { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed, VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable -- $config kept for signature parity with the query pipeline; reserved for variation-query hooks.
+	private function fetch_variation_map( array $parent_ids, Config $config ): array {
 		global $wpdb;
 
 		$parent_ids = array_values( array_unique( array_map( 'intval', $parent_ids ) ) );
+
+		// Honor the feed's status filter on the CHILDREN too (#68878).
+		// WooCommerce's read_children reads publish + private, and mirroring
+		// that here let PRIVATE variations under a published parent into a
+		// publish-only feed — Google then advertises variants a customer
+		// cannot select on the product page. The parent query already
+		// restricts by resolve_post_status(); apply the same resolved set
+		// here, whitelisted to the statuses a product post can carry so the
+		// interpolated IN () stays a fixed token list.
+		$statuses = array_values(
+			array_intersect(
+				(array) $this->resolve_post_status( $config ),
+				array( 'publish', 'draft', 'pending', 'private' )
+			)
+		);
+		if ( empty( $statuses ) ) {
+			$statuses = array( 'publish' );
+		}
+		$status_placeholders = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
 
 		$map = array();
 
@@ -467,16 +547,16 @@ class ProductQuery {
 			// enforced afterwards by the `ctxfeed_product_ids` filter (which keeps
 			// only the feed-language variations via the WPML/Polylang shims).
 			// Ordering mirrors WooCommerce's own read_children (menu_order, then
-			// ID) over publish + private children.
-			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- Structural child-ID lookup that MUST bypass WP_Query's id=>parent result cache (it mangles keys to "post_parent:{id}" on the repeated query, and WPML zeroes ids too); $placeholders is only %d tokens (one per parent id) interpolated into the query then filled by prepare() with the int parent ids — the standard safe dynamic-IN() pattern; results feed the per-feed snapshot which is itself cached.
+			// ID); the status set is the feed's own (resolved above).
+			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- Structural child-ID lookup that MUST bypass WP_Query's id=>parent result cache (it mangles keys to "post_parent:{id}" on the repeated query, and WPML zeroes ids too); $status_placeholders/$placeholders are only %s/%d tokens filled by prepare() with whitelisted status slugs and int parent ids — the standard safe dynamic-IN() pattern; results feed the per-feed snapshot which is itself cached.
 			$rows = $wpdb->get_results(
 				$wpdb->prepare(
 					"SELECT ID, post_parent FROM {$wpdb->posts}
 					 WHERE post_type = 'product_variation'
-					   AND post_status IN ( 'publish', 'private' )
+					   AND post_status IN ($status_placeholders)
 					   AND post_parent IN ($placeholders)
 					 ORDER BY menu_order ASC, ID ASC",
-					$chunk
+					array_merge( $statuses, $chunk )
 				)
 			);
 			// phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare
