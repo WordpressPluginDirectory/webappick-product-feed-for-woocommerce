@@ -5,7 +5,7 @@ Tags: woocommerce, product feed, google shopping, facebook Catalog, google listi
 Requires at least: 6.2
 Tested Up To: 7.1
 Requires PHP: 7.4
-Stable tag: 8.0.29
+Stable tag: 8.0.34
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -314,6 +314,30 @@ Upgrade to [CTXFeed Pro](https://webappick.com/plugin/woocommerce-product-feed-p
 * <strong>[Disco – Dynamic Pricing & Discount Rules for WooCommerce](https://wordpress.org/plugins/disco/)
 * <strong>[Challan – PDF Invoice & Packing Slip for WooCommerce](https://wordpress.org/plugins/webappick-pdf-invoice-for-woocommerce/)
 
+== External services ==
+
+CTX Feed builds feeds on your own server; your products and feed files are not sent to WebAppick. The plugin contacts the services below only in the situations described. Like every WordPress HTTP request, each one also carries your site's address in the user-agent header.
+
+WebAppick (webappick.com), the plugin author — [Terms and conditions](https://webappick.com/terms-and-conditions/), [Privacy policy](https://webappick.com/privacy-policy/):
+
+* CTX Feed Pro prices: the Premium page, the CTX Feed Pro card in the side panel and the "Upgrade to Pro" buttons show current prices from webappick.com's WooCommerce Store API (https://webappick.com/wp-json/wc/store/v1/products). Requested only while an administrator has one of those CTX Feed screens open, at most once every 12 hours, and cached on your site. No data is sent.
+* News widget: the "CTX Feed" widget on the WordPress Dashboard lists the latest WebAppick blog posts (https://webappick.com/wp-json/wp/v2/posts). Requested when the Dashboard is shown, at most once a day. No data is sent.
+* Usage data (opt-in only): if an administrator allows it (the setup wizard, or CTX Feed → Settings → "Share anonymous diagnostics with CTX Feed"), the plugin sends usage data to https://track.webappick.com/api/ once a week — site name and address, the admin email addresses, the administrator's name, the store country, WordPress, PHP and server details, the lists of active and inactive plugins, the theme, the plugin version, the server's IP address, product, variation and category counts, and the saved feed configurations (feed settings including any FTP/SFTP host and user name; passwords are stored encrypted). Nothing is sent unless tracking is allowed, and it can be turned off in Settings at any time.
+* Deactivation feedback: when you deactivate CTX Feed or CTX Feed Pro from the Plugins page and choose a reason, the feedback form sends that reason and anything you type to https://track.webappick.com/api/ with the plugin, WordPress and PHP versions; "I'd rather not say" sends nothing. Only if usage data is allowed does it also include the site name and address, the admin email, your name and email, server details, the server's IP address, and the same product counts and saved feed configurations as the usage data (passwords removed).
+* Support requests: the Contact support form, the discount claim form and the contact form in the deactivation dialog email what you enter to WebAppick (support@webappick.com or sales@webappick.com) through your site's own mailer, with your site address and admin email. Contact support also attaches the system status report and, for the feed you select, its configuration and file.
+
+IP address lookup (icanhazip.com, operated by Cloudflare) — [Terms](https://www.cloudflare.com/website-terms/), [Privacy policy](https://www.cloudflare.com/privacypolicy/): used only while sending usage data or deactivation feedback, to read the server's public IP address. The request itself reveals that address to the service.
+
+Promotional notices (Bitbucket, api.bitbucket.org, operated by Atlassian) — [Terms](https://www.atlassian.com/legal/atlassian-customer-agreement), [Privacy policy](https://www.atlassian.com/legal/privacy-policy): the plugin reads a small list of WebAppick offers from https://api.bitbucket.org/2.0/snippets/woofeed/RLbyop/files/woo-feed-notice.json to show dismissible admin notices. Requested on wp-admin pages at most twice a day and cached. No data is sent.
+
+WordPress.org (api.wordpress.org, downloads.wordpress.org) — [Privacy policy](https://wordpress.org/about/privacy/): the "Our plugins" page and the plugin suggestions on Plugins → Add New read plugin details from the WordPress.org Plugins API; installing a suggested plugin, installing WooCommerce from the setup wizard, and installing another CTX Feed version from Version control download the plugin from downloads.wordpress.org. Only when you open those screens or click those buttons.
+
+Google and Meta product categories — Google: [Terms](https://policies.google.com/terms), [Privacy policy](https://policies.google.com/privacy); Meta: [Terms](https://www.facebook.com/terms.php), [Privacy policy](https://www.facebook.com/privacy/policy/): the category lists for category mapping ship with the plugin. They are downloaded again only when you click to update them: Google's product taxonomy from https://www.google.com/basepages/producttype/ (or a Google taxonomy URL you enter), and Meta's from https://www.facebook.com/products/categories/. No data is sent.
+
+Connection checks on System status — PayPal: [Terms](https://www.paypal.com/us/legalhub/paypal/useragreement-full), [Privacy policy](https://www.paypal.com/us/legalhub/paypal/privacy-full); WooCommerce.com (Automattic): [Terms](https://woocommerce.com/terms-conditions/), [Privacy policy](https://automattic.com/privacy/): when you open CTX Feed → System status, the plugin tests whether your server can make outgoing requests, like WooCommerce's own status report: a POST to https://www.paypal.com/cgi-bin/webscr (body cmd=_notify-validate) and a GET to https://woocommerce.com/wc-api/product-key-api?request=ping. No store data is sent.
+
+Your own FTP/SFTP server: if you turn on FTP or SFTP upload for a feed, the feed file is uploaded to the server and account you enter, after each generation.
+
 == Installation ==
 
 = Automatic Installation =
@@ -469,19 +493,59 @@ If your feed fails to generate:
 
 == Changelog ==
 
-= Version 8.0.29 =
-* Added: Google Product Review feed — every review gets a title taken from the start of the review text (the first sentence, or about 70 characters cut at a word), because WooCommerce reviews have no title of their own. Merchant Center no longer reports the title as missing.
-* Added: Google Product Review feed — a Product MPN row. Google matches reviews to products by GTIN or by brand + MPN, so stores without barcodes (for example their own brand) can map MPN to the SKU together with the brand.
-* Fix: Google Product Review feed — the Product Title and Product URL rows show their names in the feed editor instead of "Select Attribute", and the values mapped to them are used in the feed.
-* Added: Google feeds can send up to 10 product videos. Video Link 1–10 work like Additional Image 1–10: one video URL per row, each exported as its own video_link.
-* Fix: Google feeds — Min/Max Handling Time are exported on their own when the feed has no Shipping block, instead of being left out. With a Shipping block they stay inside it.
-* Improved: with Remove out-of-stock products (CTX Feed Pro) on, a variable product exported as one row lists only the attribute options that still have a sellable variation — for example Sizes "Toddler, Small, Medium" when Large is sold out. Needs CTX Feed Pro 8.0.20.
-* Fix: editing a feed that was saved without an update interval now shows "Every 24 Hours", the schedule it actually runs on, instead of "Select interval".
-* Fix: the License screen asks you to paste your API key and points to My Account > License keys on webappick.com, and "Manage license key" opens that page.
-* Improved: the Import feed drop zone can be used with the keyboard.
+= Version 8.0.34 =
+* Fix: a feed no longer lists the same products twice. On some servers two background processes could build the same feed at once; now only one can.
+* Fix: an update that is still copying its files no longer causes a "critical error" on the site. CTX Feed waits until the update has finished and shows administrators a short notice meanwhile.
+* Fix: FTP and SFTP uploads go straight to the feed's real file name. Google Merchant Center's SFTP no longer reports a ".part" file.
+* Added: FTP/SFTP upload progress in the live log on Manage Feeds and in the feed log. A run is marked complete only after the upload has finished.
+* Fix: the live generation log on Manage Feeds always fits inside the page and no longer runs past the left or right edge.
 
-= Version 8.0.28 =
-* Added: Google feeds can send several destinations. Excluded Destination and Included Destination are now available as Excluded Destination 1–8 and Included Destination 1–8 on the Google Shopping, Google Local, Google Local Inventory and Google Shopping Action templates — one destination per row (for example Shopping_ads and Display_ads), each exported as its own tag. Existing feeds are unchanged.
-* Fix: Parent Title now falls back to the product's own title for simple and variable products instead of staying empty, so a feed that mixes variations and simple products can map Title to Parent Title.
-* Fix: multilingual stores (TranslatePress, WPML) — a title or any other product field used inside an attribute mapping or a dynamic attribute is now translated the same way as when it is mapped in its own row. Needs CTX Feed Pro 8.0.19.
-* Improved: on the Version Control page, updating CTX Feed Pro while the free plugin is also behind offers to update CTX Feed first and then Pro in one step.
+= Version 8.0.33 =
+* Changed: ChatGPT feeds follow OpenAI's own product feed format (item_id, url, image_url, seller_name, and variants with group_id and variant_dict). Saved ChatGPT feeds are updated automatically on update; the original settings are kept as a backup.
+* Fix: feeds made with an older version follow the "include all shipping countries" setting again, and the Filters tab shows the real value so saving no longer switches it to the feed country.
+* Fix: text you type into a mapping row, such as a fixed brand, is never translated by TranslatePress. Needs CTX Feed Pro 8.0.24.
+* Fix: a run that finds no products keeps the previous feed file and its "Last updated" date, and the feed log says so.
+* Fix: Bing sale_price is a plain number, as Microsoft requires.
+* Fix: feeds on a 5-, 15-, 30- or 45-minute schedule are listed under the right status in Manage Feeds.
+* Security: feed logs are stored in a folder with a random name, so they cannot be opened on servers that ignore .htaccess (such as nginx).
+* Added: email notifications when a scheduled feed update fails, finds no products or stops running (Settings > Notifications). Needs CTX Feed Pro 8.0.24.
+* Added: a notice before updating from Version Control while CTX Feed is going through its major update.
+* Improved: Google Shopping Actions, Walmart, Etsy, Shopee and Wish templates are marked as legacy with an explanation; Walmart no longer offers JSON.
+* Improved: clearer hints for the FTP/SFTP path and the XML Extra header.
+* Improved: the plugin zip no longer includes developer test files.
+
+= Version 8.0.32 =
+* Security: FTP/SFTP passwords never leave your site. Feed details, exported .wpf files, the support bundle and AI tools no longer contain them, and the connection test reuses a saved password only for the same server and user. Feed logs are protected on Apache 2.4 too.
+* Security: the WP Options attribute can no longer put passwords, secret keys, license keys or similar settings into a feed.
+* Security: the FTP connection test no longer connects to local or private network addresses.
+* Security: an imported feed file keeps Custom Template 2 code blocks only when an Administrator imports it.
+* Fix: a feed that could not be written completely (for example a full disk) or could not replace the live file keeps the previous feed and is marked failed, instead of publishing a broken file.
+* Fix: SFTP uploads are streamed, checked and replace the live file in one step; the server key is remembered and a changed key stops the upload.
+* Fix: generated feeds are always valid UTF-8, and TXT headers use the feed's delimiter and enclosure.
+* Fix: Google feeds use Google's unit names (lb, cm, in). Google Local feeds send the GTIN instead of the SKU, and Local Inventory sends backordered items as out of stock.
+* Fix: the Google Promotions feed writes one row per promotion, as Google requires, in TSV (default) or RSS XML.
+* Fix: Bing feeds follow Microsoft's specification: backordered items are sent as preorder, shipping prices as plain numbers, identifier_exists as TRUE/FALSE, and long titles and descriptions are shortened.
+* Changed: ChatGPT feeds offer CSV and TSV. Existing JSON feeds keep working.
+* Fix: deleting a feed removes its file after a domain change and no longer deletes other feeds' logs; scheduled runs are not affected by daylight-saving changes; uninstalling removes the plugin's scheduled jobs.
+* Fix: no PHP 8.4 deprecation notice when writing CSV feeds; availability dates use the store's time zone.
+* Added: an AI connection (MCP) switch on the AI assistant page to turn the AI connection off completely. Needs CTX Feed Pro 8.0.23.
+
+= Version 8.0.31 =
+* Fix: no fatal error when Action Scheduler or Rank Math's settings API is not loaded — feed generation and scheduling check that they are available first, and a feed that cannot be scheduled is marked failed instead of breaking the page.
+* Added: stores using WooPayments Multi-Currency, YayCurrency or X-Currency get the Feed Currency field in the feed editor, and System Status reports them as a multi-currency site. Converting prices to the feed currency needs CTX Feed Pro 8.0.22.
+* Fix: when a feed currency is selected before choosing a template, the template's price rows use that currency (for example EUR) instead of the store currency.
+* Fix: Google category mappings saved by version 6 as full text paths are converted to Google category IDs once on update, and older untouched rows no longer block saving a mapping.
+* Security: FTP/SFTP passwords are never sent inside feed configurations.
+* Fix: the deactivation feedback form sends only what you agree to share.
+* Added: the License menu is always shown, with a page explaining how to get CTX Feed Pro when it is not installed.
+* Improved: the "Pro features" menu is now "Premium", with current CTX Feed Pro prices.
+* Fix: the "Activate" links on the Our Plugins page and the "Update CTX Feed Pro now" link for old Pro versions work again.
+* Improved: the External services section of this readme lists every remote service the plugin contacts.
+
+== Upgrade Notice ==
+
+= 8.0.34 =
+CTX Feed is going through a major update. Back up your site, update CTX Feed and CTX Feed Pro together, then regenerate your feeds and check them: titles, prices, brand and shipping.
+
+= 8.0.33 =
+CTX Feed is going through a major update. Back up your site, update CTX Feed and CTX Feed Pro together, then regenerate your feeds and check them: titles, prices, brand and shipping.

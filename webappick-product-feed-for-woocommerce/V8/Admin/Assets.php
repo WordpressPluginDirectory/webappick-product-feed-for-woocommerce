@@ -148,7 +148,19 @@ class Assets {
 				'woocommerceActive' => class_exists( 'WooCommerce' ),
 				'canInstallPlugins' => current_user_can( 'install_plugins' ),
 			),
+			// Pro plugin active / installed-but-inactive / missing, with the
+			// activation and upload links the License page offers (CBT-686).
+			'pro_plugin'   => ProPlugin::state(),
+			// CTX Feed Pro prices known without a remote call (fresh copy,
+			// last webappick.com answer, or bundled); GET /pricing refreshes
+			// them (CBT-688).
+			'pro_pricing'  => ProPricing::snapshot(),
 		);
+
+		// What an unset Shipping/Tax country scope means on this site (the
+		// global allow_all_shipping, V5 parity) so the Filters tab shows the
+		// effective value of a V5-era feed (CBT-728).
+		$data['country_scope_default'] = \CTXFeed\V8\Product\ShippingResolver::all_countries( '' ) ? 'all' : 'feed';
 
 		/**
 		 * Filter the data passed to the React admin app via wp_localize_script.

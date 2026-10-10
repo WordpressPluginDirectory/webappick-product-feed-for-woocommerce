@@ -98,6 +98,7 @@ class TemplateInfo {
 			'google'                 => 'channels/google.svg',
 			'google_local'           => 'channels/google.svg',
 			'google_local_inventory' => 'channels/google.svg',
+			'google_promotions'      => 'channels/google.svg',
 			'googlereview'           => 'channels/google.svg',
 			'google_dynamic_ads'     => 'channels/google.svg',
 			'google_shopping_action' => 'channels/google.svg',
@@ -206,6 +207,12 @@ class TemplateInfo {
 				'feed_file_type' => array( 'XML', 'CSV', 'TXT' ),
 				'doc'            => array( esc_attr__( 'How to Generate Google Local Inventory Feed', 'woo-feed' ) => 'https://webappick.com/generate-google-local-inventory-feed/#what-are-google%E2%80%99s-free-local-inventory-product-listings?' ),
 			),
+			// Google Promotions: tab-delimited or XML (answer/2906014); TSV
+			// first = the default file type (CBT-716).
+			'google_promotions'                 => array(
+				'link'           => 'https://support.google.com/merchants/answer/2906014',
+				'feed_file_type' => array( 'TSV', 'XML' ),
+			),
 			'googlereview'                      => array(
 				'link'           => 'https://developers.google.com/product-review-feeds/sample',
 				'feed_file_type' => array( 'XML' ),
@@ -222,11 +229,13 @@ class TemplateInfo {
 				'link'           => 'https://www.perplexity.ai/merchants',
 				'feed_file_type' => array( 'CSV', 'TSV', 'XML' ),
 			),
-			// OpenAI Product Feed Spec: JSONL/CSV/TSV (+Parquet). XML is
-			// not an OpenAI-ingestible format, so it's not offered.
+			// OpenAI Product Feed Spec: JSONL/CSV/TSV (+Parquet). XML is not
+			// ingestible, and our JSON is one array, not JSON Lines — so only
+			// CSV and TSV are offered (owner, CBT-712). Existing JSON feeds
+			// keep generating.
 			'chatgpt'                           => array(
 				'link'           => 'https://chatgpt.com/merchants',
-				'feed_file_type' => array( 'CSV', 'TSV', 'JSON' ),
+				'feed_file_type' => array( 'CSV', 'TSV' ),
 			),
 			// X Shopping Manager ingests CSV/TSV only (upload or
 			// scheduled URL fetch) — XML is not a documented format.
@@ -265,7 +274,8 @@ class TemplateInfo {
 				),
 			), // Pinterest.
 			'pinterest_rss'                     => array(
-				'link'           => 'https://help.pinterest.com/en/business/article/before-you-get-started-with-catalogs',
+				// An RSS board auto-publishes Pins — not a catalog (CBT-721).
+				'link'           => 'https://help.pinterest.com/en/business/article/auto-publish-pins-from-your-rss-feed',
 				'feed_file_type' => array( 'XML' ),
 			), // Pinterest.
 			'bing'                              => array(
@@ -358,6 +368,7 @@ class TemplateInfo {
 			), // Bol.
 			'wish'                              => array(
 				'link'           => 'https://merchanthelp.wish.com/s/article/mu1260805100070?language=en_US',
+				'note'           => esc_html__( 'Legacy template: Wish has changed its product requirements. Check the required columns (such as category, currency and shipping) in Wish Merchant help before uploading.', 'woo-feed' ),
 				'feed_file_type' => array( 'CSV' ),
 				'doc'            => array(
 					esc_html__( 'How to Generate a Wish.com Product Feed?', 'woo-feed' ) => 'https://webappick.com/wish-product-feed/',
@@ -413,6 +424,7 @@ class TemplateInfo {
 			),
 			'google_shopping_action'            => array(
 				'link'           => 'https://support.google.com/merchants/answer/9111285',
+				'note'           => esc_html__( 'Legacy template: Google closed Buy on Google (Shopping Actions) in 2023. For Google Shopping ads and free listings, use the Google Shopping template.', 'woo-feed' ),
 				'video'          => '',
 				'doc'            => array(
 					esc_html__( 'Set up return policies for Shopping Actions', 'woo-feed' )  => 'https://support.google.com/merchants/answer/7660817',
@@ -613,6 +625,7 @@ class TemplateInfo {
 				'feed_file_type' => array( 'CSV' ),
 			),
 			'shopee'                            => array(
+				'note'           => esc_html__( 'Legacy template: Shopee imports products with its own Excel mass-upload template. Use this file as a source and copy the columns into Shopee\'s template.', 'woo-feed' ),
 				'feed_file_type' => array( 'CSV' ),
 			),
 			'zalando'                           => array(
@@ -620,6 +633,7 @@ class TemplateInfo {
 				'feed_file_type' => array( 'CSV' ),
 			),
 			'etsy'                              => array(
+				'note'           => esc_html__( 'Legacy template: Etsy has no bulk feed upload. This CSV is for import tools that accept one.', 'woo-feed' ),
 				'feed_file_type' => array( 'CSV' ),
 			),
 			'tweaker_xml'                       => array(
@@ -698,7 +712,9 @@ class TemplateInfo {
 			),
 			'walmart'                           => array(
 				'link'           => 'https://developer.walmart.com/documentation/item-object-v4-0-2/',
-				'feed_file_type' => array( 'XML', 'CSV', 'TSV', 'TXT', 'JSON' ),
+				'note'           => esc_html__( 'Legacy template: Walmart Marketplace adds items through its own item API, not a feed file. Use this file for a feed partner or as a reference.', 'woo-feed' ),
+				// JSON dropped: our JSON is not a submittable MP Item payload (CBT-721).
+				'feed_file_type' => array( 'XML', 'CSV', 'TSV', 'TXT' ),
 				'doc'            => array(
 					esc_html__( 'How to Generate a Walmart Product Feed?', 'woo-feed' )           => 'https://webappick.com/walmart-product-feed/',
 				),

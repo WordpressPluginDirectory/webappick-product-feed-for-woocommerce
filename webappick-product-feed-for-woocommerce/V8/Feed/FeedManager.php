@@ -14,6 +14,7 @@
 namespace CTXFeed\V8\Feed;
 
 use CTXFeed\V8\Core\Config;
+use CTXFeed\V8\Core\Logger;
 
 // Exit if accessed directly.
 if ( ! defined( 'ABSPATH' ) ) {
@@ -33,6 +34,22 @@ class FeedManager {
 	 *
 	 * @since 8.0.10
 	 */
+	/**
+	 * FTP/SFTP upload fields of the progress record (CBT-737): upload_status
+	 * ('' | 'uploading' | 'uploaded' | 'failed'), upload_protocol ('ftp' |
+	 * 'sftp'), upload_sent / upload_total (bytes). The admin console renders
+	 * the upload from them; reset at the start of every run.
+	 *
+	 * @since 8.0.34
+	 * @var array<string, string|int>
+	 */
+	const UPLOAD_DEFAULTS = array(
+		'upload_status'   => '',
+		'upload_protocol' => '',
+		'upload_sent'     => 0,
+		'upload_total'    => 0,
+	);
+
 	const BATCH_COUNTERS = array(
 		'last_batch_written',
 		'last_batch_skipped',
@@ -115,7 +132,7 @@ class FeedManager {
 		$names = $wpdb->get_col(
 			$wpdb->prepare(
 				"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
-				'wf_feed_%'
+				$wpdb->esc_like( 'wf_feed_' ) . '%'
 			)
 		);
 
@@ -168,8 +185,7 @@ class FeedManager {
 	 */
 	public function promote_feed( string $feed_id, string $file_path ): bool {
 		// Build the public URL from the file path.
-		$upload_dir = wp_upload_dir();
-		$url        = str_replace( $upload_dir['basedir'], $upload_dir['baseurl'], $file_path );
+		$url = \CTXFeed\V8\Utility\Filesystem::path_to_url( $file_path );
 
 		// Read existing wf_feed_ data (created during create_feed).
 		$existing = \CTXFeed\V8\Utility\Sanitizer::safe_unserialize( get_option( 'wf_feed_' . $feed_id ) );
@@ -310,6 +326,10 @@ class FeedManager {
 			'batches_total'   => isset( $data['batches_total'] ) ? (int) $data['batches_total'] : $existing['batches_total'],
 			'started_at'      => $existing['started_at'] ? $existing['started_at'] : $now,
 			'updated_at'      => $now,
+			// UTC epoch twin of updated_at: liveness checks compare this, so a
+			// DST jump in the WP-local wall clock never makes a live run look
+			// dead (or a dead one live) — CBT-720.
+			'updated_ts'      => time(),
 			'eta_seconds'     => isset( $data['eta_seconds'] ) ? (int) $data['eta_seconds'] : $existing['eta_seconds'],
 			'avg_batch_time'  => isset( $data['avg_batch_time'] ) ? (float) $data['avg_batch_time'] : $existing['avg_batch_time'],
 			// End-of-batch stamp (microtime float) — the next batch reports
@@ -323,7 +343,18 @@ class FeedManager {
 			'invalid_reasons' => isset( $data['invalid_reasons'] )
 				? array_map( 'strval', (array) $data['invalid_reasons'] )
 				: (array) ( $existing['invalid_reasons'] ?? array() ),
+			// CBT-710: a batch hit a short write — finalize must not publish.
+			// Listed here or the fixed-key merge drops it.
+			'write_failed'    => isset( $data['write_failed'] ) ? (bool) $data['write_failed'] : ! empty( $existing['write_failed'] ),
+			// A 0-product run kept the previous feed file unstamped (CBT-724).
+			'kept_previous'   => isset( $data['kept_previous'] ) ? (bool) $data['kept_previous'] : ! empty( $existing['kept_previous'] ),
 		);
+
+		// Upload fields (CBT-737) — fixed-key list, like everything above.
+		foreach ( self::UPLOAD_DEFAULTS as $key => $default ) {
+			$value            = array_key_exists( $key, $data ) ? $data[ $key ] : ( $existing[ $key ] ?? $default );
+			$progress[ $key ] = is_int( $default ) ? (int) $value : (string) $value;
+		}
 
 		// Per-batch counters for the live generation console. These were
 		// silently dropped by the fixed key list above, so the console always
@@ -338,6 +369,57 @@ class FeedManager {
 		}
 
 		set_transient( "ctxfeed_progress_{$feed_id}", $progress, HOUR_IN_SECONDS );
+
+		$this->announce_outcome( $feed_id, $existing, $progress, $data );
+	}
+
+	/**
+	 * Fire the run-outcome actions once, on the transition (CBT-730).
+	 *
+	 * Every failure path (sync throw, dead batch chain, fatal shutdown,
+	 * finalize) ends in update_progress( status => 'failed' ), so this is the
+	 * one place that sees them all. Listeners (the Pro failure-email engine)
+	 * can never break generation: each call is isolated.
+	 *
+	 * @since 8.0.33
+	 *
+	 * @param string $feed_id  Feed slug.
+	 * @param array  $existing Progress before this update.
+	 * @param array  $progress Progress after this update.
+	 * @param array  $data     The fields this call set.
+	 * @return void
+	 */
+	private function announce_outcome( string $feed_id, array $existing, array $progress, array $data ): void {
+		try {
+			if ( 'failed' === $progress['status'] && 'failed' !== ( $existing['status'] ?? '' ) ) {
+				/**
+				 * Fires once when a feed run turns `failed`.
+				 *
+				 * `$progress['trigger']` is 'scheduled' for auto-update runs.
+				 *
+				 * @since 8.0.33
+				 *
+				 * @param string $feed_id  Feed slug.
+				 * @param array  $progress Progress record.
+				 */
+				do_action( 'ctxfeed_feed_run_failed', $feed_id, $progress );
+			}
+
+			if ( ! empty( $data['kept_previous'] ) && 'completed' === $progress['status'] ) {
+				/**
+				 * Fires when a run found 0 products and kept the previous
+				 * feed file (CBT-724).
+				 *
+				 * @since 8.0.33
+				 *
+				 * @param string $feed_id  Feed slug.
+				 * @param array  $progress Progress record.
+				 */
+				do_action( 'ctxfeed_feed_kept_previous', $feed_id, $progress );
+			}
+		} catch ( \Throwable $e ) {
+			Logger::error( "Run-outcome listener failed (non-fatal): {$feed_id}", array( 'error' => $e->getMessage() ) );
+		}
 	}
 
 	/**
@@ -388,7 +470,7 @@ class FeedManager {
 				'eta_seconds'     => 0,
 				'avg_batch_time'  => 0.0,
 				'invalid_reasons' => array(),
-			) + array_fill_keys( self::BATCH_COUNTERS, 0 );
+			) + array_fill_keys( self::BATCH_COUNTERS, 0 ) + self::UPLOAD_DEFAULTS;
 		}
 
 		// Backfill any missing keys for backwards compatibility.
@@ -407,7 +489,7 @@ class FeedManager {
 				'eta_seconds'     => 0,
 				'avg_batch_time'  => 0.0,
 				'invalid_reasons' => array(),
-			) + array_fill_keys( self::BATCH_COUNTERS, 0 ),
+			) + array_fill_keys( self::BATCH_COUNTERS, 0 ) + self::UPLOAD_DEFAULTS,
 			$progress
 		);
 	}

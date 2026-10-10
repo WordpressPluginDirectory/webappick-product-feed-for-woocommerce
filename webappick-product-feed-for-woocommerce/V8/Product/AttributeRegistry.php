@@ -404,6 +404,8 @@ class AttributeRegistry {
 				'ex_link'                => __( 'External Product URL', 'woo-feed' ),
 				'add_to_cart_link'       => __( 'Add to Cart URL', 'woo-feed' ),
 				'item_group_id'          => __( 'Parent Id [Group Id]', 'woo-feed' ),
+				'variant_options'        => __( 'Variant Options [JSON]', 'woo-feed' ),
+				'is_variation'           => __( 'Is Variation [true/empty]', 'woo-feed' ),
 				'sku'                    => __( 'SKU', 'woo-feed' ),
 				'sku_id'                 => __( 'SKU_ID', 'woo-feed' ),
 				'parent_sku'             => __( 'Parent SKU', 'woo-feed' ),
@@ -821,7 +823,7 @@ class AttributeRegistry {
 		$data = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s",
-				self::PREFIX_CAT_MAPPING . '%'
+				$wpdb->esc_like( self::PREFIX_CAT_MAPPING ) . '%'
 			)
 		);
 
@@ -1074,7 +1076,7 @@ class AttributeRegistry {
 		$data = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s",
-				self::PREFIX_DYN_ATTRIBUTE . '%'
+				$wpdb->esc_like( self::PREFIX_DYN_ATTRIBUTE ) . '%'
 			)
 		);
 
@@ -1108,7 +1110,7 @@ class AttributeRegistry {
 		$data = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s",
-				self::PREFIX_ATTR_MAPPING . '%'
+				$wpdb->esc_like( self::PREFIX_ATTR_MAPPING ) . '%'
 			)
 		);
 

@@ -741,7 +741,9 @@ class AttributeResolver {
 					$plain_desc = (string) strip_shortcodes( $plain_desc );
 				}
 				$plain_desc = wp_strip_all_tags( html_entity_decode( $plain_desc, ENT_QUOTES ) );
-				$plain_desc = trim( (string) preg_replace( '/\s+/u', ' ', $plain_desc ) );
+				// Invalid UTF-8 (wrong-charset import) made the /u collapse
+				// return null and the whole description vanish (CBT-694).
+				$plain_desc = trim( (string) preg_replace( '/\s+/u', ' ', \CTXFeed\V8\Utility\Utf8::scrub( $plain_desc ) ) );
 				return apply_filters( 'woo_feed_filter_product_description', $plain_desc, $product, $config );
 
 			// V5 attribute: `description_with_html` — preserves HTML
@@ -1327,6 +1329,16 @@ class AttributeResolver {
 
 			case 'custom_xml_variations':
 				return $this->resolve_custom_xml_variations( $product, $config );
+
+			// A variation's selected options as a JSON object, e.g.
+			// {"Color":"Black","Size":"10"} — OpenAI's variant_dict (CBT-712).
+			case 'variant_options':
+				return $this->resolve_variant_options( $product );
+
+			// 'true' for a variation, '' otherwise — OpenAI's
+			// listing_has_variations (CBT-712).
+			case 'is_variation':
+				return $product instanceof \WC_Product_Variation ? 'true' : '';
 
 			default:
 				// WooCommerce product attributes (wf_attr_* prefix).
@@ -2002,8 +2014,15 @@ class AttributeResolver {
 		$availability_date = (string) get_post_meta( $product->get_id(), $meta_key, true );
 
 		if ( '' !== $availability_date ) {
-			$timestamp         = strtotime( $availability_date );
-			$availability_date = false !== $timestamp ? gmdate( 'c', $timestamp ) : '';
+			// A date the merchant picked is a date in the STORE's timezone;
+			// strtotime() read it as UTC midnight, the evening before in
+			// UTC−X stores (CBT-719).
+			try {
+				$zone              = function_exists( 'wp_timezone' ) ? wp_timezone() : new \DateTimeZone( 'UTC' );
+				$availability_date = ( new \DateTimeImmutable( $availability_date, $zone ) )->format( 'c' );
+			} catch ( \Exception $e ) {
+				$availability_date = '';
+			}
 		}
 
 		// @hook woo_feed_filter_product_availability_date — V5 legacy bridge.
@@ -2056,5 +2075,38 @@ class AttributeResolver {
 		}
 
 		return apply_filters( $filter, $value, $product, $config ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.DynamicHooknameFound -- $filter is always a "woo_feed_filter_unit_price_*" V5 legacy-bridge hook (see call sites).
+	}
+
+	/**
+	 * A variation's selected options as a JSON object of display labels to
+	 * display values (OpenAI variant_dict, CBT-712). '' for anything that
+	 * is not a variation or has no options.
+	 *
+	 * @since 8.0.33
+	 *
+	 * @param \WC_Product $product Product.
+	 * @return string
+	 */
+	private function resolve_variant_options( \WC_Product $product ): string {
+		if ( ! $product instanceof \WC_Product_Variation ) {
+			return '';
+		}
+
+		$options = array();
+		foreach ( (array) $product->get_attributes() as $name => $value ) {
+			$name  = (string) $name;
+			$value = is_scalar( $value ) ? (string) $value : '';
+			if ( '' === $name || '' === $value ) {
+				continue; // "Any …" variation attribute: no selected value.
+			}
+			if ( taxonomy_exists( $name ) ) {
+				$term  = get_term_by( 'slug', $value, $name );
+				$value = $term instanceof \WP_Term ? $term->name : $value;
+			}
+			$label             = function_exists( 'wc_attribute_label' ) ? wc_attribute_label( $name, $product ) : $name;
+			$options[ $label ] = $value;
+		}
+
+		return empty( $options ) ? '' : (string) wp_json_encode( $options, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
 	}
 }

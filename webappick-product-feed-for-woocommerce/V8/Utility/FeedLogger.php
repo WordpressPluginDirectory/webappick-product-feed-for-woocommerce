@@ -82,8 +82,7 @@ class FeedLogger {
 		 */
 		$this->enabled = (bool) apply_filters( 'ctxfeed_feed_log_enabled', true );
 
-		$upload_dir    = wp_get_upload_dir();
-		$this->log_dir = trailingslashit( $upload_dir['basedir'] ) . 'woo-feed/logs/';
+		$this->log_dir = LogDirGuard::dir(); // Random per-site folder (CBT-725).
 	}
 
 	/**
@@ -359,7 +358,7 @@ class FeedLogger {
 	}
 
 	/**
-	 * Remove rotated (`{slug}.N.log`) and dated (`{slug}-*.log`) copies left
+	 * Remove rotated (`{slug}.N.log`) and dated (`{slug}-YYYY-MM-DD*.log`) copies left
 	 * by earlier builds. One file per feed is the contract now.
 	 *
 	 * @since 8.0.10
@@ -370,7 +369,18 @@ class FeedLogger {
 	private function delete_legacy_copies( string $feed_slug ): int {
 		$base    = $this->log_dir . sanitize_file_name( $feed_slug );
 		$deleted = 0;
-		foreach ( array_merge( (array) glob( $base . '.[0-9]*.log' ), (array) glob( $base . '-*.log' ) ) as $copy ) {
+		// Only the exact legacy shapes: `{slug}.N.log` and `{slug}-YYYY-MM-DD*.log`.
+		// A bare `{slug}-*.log` also matched OTHER feeds' logs (deleting feed
+		// "shop" removed "shop-uk.log") — CBT-720.
+		$copies = array_merge(
+			(array) glob( $base . '.[0-9]*.log' ),
+			(array) glob( $base . '-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*.log' )
+		);
+		foreach ( $copies as $copy ) {
+			$name = substr( basename( (string) $copy ), strlen( basename( $base ) ) );
+			if ( 1 !== preg_match( '/^(?:\.\d+|-\d{4}-\d{2}-\d{2}(?:[-_.][A-Za-z0-9]+)*)\.log$/', $name ) ) {
+				continue;
+			}
 			if ( is_file( $copy ) ) {
 				wp_delete_file( $copy );
 				++$deleted;
@@ -390,6 +400,7 @@ class FeedLogger {
 	private function ensure_dir(): void {
 		if ( ! is_dir( $this->log_dir ) ) {
 			wp_mkdir_p( $this->log_dir );
+			LogDirGuard::ensure( $this->log_dir ); // CBT-708: a folder created here had no guard.
 		}
 	}
 

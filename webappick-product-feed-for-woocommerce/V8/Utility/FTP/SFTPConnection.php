@@ -67,11 +67,25 @@ class SFTPConnection {
 
 		// Security: Man in the middle attack protection.
 		if ( $f_print ) {
-			$fingerprint = ssh2_fingerprint( $this->connection, SSH2_FINGERPRINT_MD5 | SSH2_FINGERPRINT_HEX );
-			if ( $fingerprint !== $f_print ) {
-				throw new \Exception( sprintf( 'Known host fingerprint "%s" does not match %s:%s fingerprint "%s". Possible man-in-the-middle attack ?', esc_attr( $f_print ), esc_attr( $host ), esc_attr( $port ), esc_attr( $fingerprint ) ) );
+			$fingerprint = $this->get_fingerprint();
+			if ( '' !== $fingerprint && strtolower( $fingerprint ) !== strtolower( (string) $f_print ) ) {
+				throw new \Exception( sprintf( 'The SFTP server at %1$s:%2$s presented a different identity (host key) than on earlier uploads, so the upload was stopped to protect your password. If you moved or reinstalled that server, open Edit feed → FTP / SFTP and click Save to accept the new key; otherwise contact your host.', esc_attr( $host ), esc_attr( $port ) ) );
 			}
 		}
+	}
+
+	/**
+	 * The server's host-key fingerprint (MD5, hex), or '' when unavailable.
+	 *
+	 * @since 8.0.32
+	 * @return string
+	 */
+	public function get_fingerprint(): string {
+		if ( ! $this->connection || ! function_exists( 'ssh2_fingerprint' ) || ! defined( 'SSH2_FINGERPRINT_MD5' ) || ! defined( 'SSH2_FINGERPRINT_HEX' ) ) {
+			return '';
+		}
+
+		return (string) ssh2_fingerprint( $this->connection, SSH2_FINGERPRINT_MD5 | SSH2_FINGERPRINT_HEX );
 	}
 
 	/**
@@ -87,7 +101,9 @@ class SFTPConnection {
 	 */
 	public function login( $username, $password ) {
 		if ( ! ssh2_auth_password( $this->connection, $username, $password ) ) {
-			throw new \Exception( 'Could not authenticate with username ' . esc_attr( $username ) . ' and password ' . esc_attr( $password ) . ' .' );
+			// Never put the password in the message: it is written to the
+			// feed log, the WooCommerce log and support bundles (CBT-708).
+			throw new \Exception( 'Could not authenticate with username ' . esc_attr( $username ) . '. Check the username and password.' );
 		}
 
 		$this->sftp = ssh2_sftp( $this->connection );
@@ -97,27 +113,31 @@ class SFTPConnection {
 	}
 
 	/**
-	 * Upload a generated feed file to the remote SFTP server.
+	 * Upload a file to the SFTP server under its FINAL name.
 	 *
-	 * @since 8.0.0
+	 * Written straight to the target name, never a temporary name renamed
+	 * afterwards (CBT-737): ingest servers such as Google Merchant Center's
+	 * (partnerupload.google.com) process every file the moment it is closed,
+	 * by its name, so a temporary ".name.part" file was picked up as an
+	 * unknown feed and reported as an error. The transfer is still streamed
+	 * in chunks (never the whole feed in memory) and verified: every byte
+	 * written, the stream closed cleanly, and — when the server reports it —
+	 * the remote size equals the local size.
 	 *
-	 * @param string $local_file  Local file to upload.
-	 * @param string $remote_file Remote file name.
-	 * @param string $path        Must use trailing slash. Directory path to put the file on remote server.
+	 * @param string        $local_file  Local file to upload.
+	 * @param string        $remote_file Remote file name.
+	 * @param string        $path        Must use trailing slash. Directory path to put the file on remote server.
+	 * @param callable|null $on_progress Called as ( int $bytes_sent, int $bytes_total ) after every chunk. @since 8.0.34.
 	 *
 	 * @return bool True once the file has been written to the remote server.
 	 * @throws \Exception When the local file is unreadable, the remote path is invalid, or the transfer fails.
 	 */
-	public function upload_file( $local_file, $remote_file, $path ) {
+	public function upload_file( $local_file, $remote_file, $path, $on_progress = null ) {
 
 		if ( ! file_exists( $local_file ) ) {
 			throw new \Exception( "Local file does't exists.: " . esc_attr( $local_file ) . '.' );
 		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents, WordPressVIPMinimum.Performance.FetchingRemoteData.FileGetContentsUnknown -- Local read only: $local_file is the feed file this plugin just generated under wp-content/uploads. It must be shipped byte-for-byte, and WP_Filesystem is not initialised on the Action Scheduler cron request that performs the upload.
-		$data_to_send = file_get_contents( $local_file );
-		if ( false === $data_to_send ) {
-			throw new \Exception( 'Could not open local file: ' . esc_attr( $local_file ) . '.' );
-		}
+		$local_size = (int) filesize( $local_file );
 
 		$sftp = $this->sftp;
 		if ( ! is_dir( "ssh2.sftp://$sftp$path" ) ) {
@@ -138,20 +158,107 @@ class SFTPConnection {
 
 		}
 
+		$final_remote = $path . $remote_file;
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Local read of the feed file this plugin just generated; streamed, never loaded whole.
+		$local = fopen( $local_file, 'rb' );
+		if ( ! $local ) {
+			throw new \Exception( 'Could not open local file: ' . esc_attr( $local_file ) . '.' );
+		}
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Opens the ssh2.sftp:// stream wrapper for the remote feed file; WP_Filesystem cannot address an SFTP stream resource.
-		$stream = fopen( "ssh2.sftp://$sftp$path$remote_file", 'w' );
+		$stream = fopen( "ssh2.sftp://$sftp$final_remote", 'w' );
 		if ( ! $stream ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closes the local handle opened above.
+			fclose( $local );
 			throw new \Exception( 'Could not open file: ' . esc_attr( $path ) . '.' );
 		}
 
-		// phpcs:ignore WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fwrite, WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Writing the feed file to the merchant's own remote server IS the product feature; the bytes must land unmodified.
-		if ( false === fwrite( $stream, $data_to_send ) ) {
-			throw new \Exception( 'Could not send data from file: ' . esc_attr( $local_file ) . '.' );
+		$copied = self::copy_stream( $local, $stream, $local_size, $on_progress );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closes the local handle opened above.
+		fclose( $local );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closes the ssh2.sftp:// stream; its result is the last chance to see a failed flush.
+		$closed = fclose( $stream );
+
+		if ( $copied !== $local_size || false === $closed ) {
+			throw new \Exception( sprintf( 'Upload incomplete: %1$d of %2$d bytes reached the server (connection dropped or remote disk/quota full). The file on the server may be incomplete until the next successful upload.', absint( $copied ), absint( $local_size ) ) );
 		}
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Closes the ssh2.sftp:// stream opened above.
-		fclose( $stream );
+		// Ingest servers may move the file away the moment it is closed; an
+		// unknown size is not a failure, only a different one is.
+		$remote_size = $this->remote_size( $final_remote );
+		if ( null !== $remote_size && $remote_size !== $local_size ) {
+			throw new \Exception( sprintf( 'Upload incomplete: the server holds %1$d of %2$d bytes. The file on the server may be incomplete until the next successful upload.', absint( $remote_size ), absint( $local_size ) ) );
+		}
+
 		return true;
+	}
+
+	/**
+	 * Copy a local stream to a remote one in chunks, reporting progress.
+	 *
+	 * Handles short writes (an SFTP stream may accept part of a chunk) and
+	 * stops on a write that makes no progress, so a dead connection cannot
+	 * spin forever.
+	 *
+	 * @since 8.0.34
+	 *
+	 * @param resource      $from        Local read handle.
+	 * @param resource      $to          Remote write handle.
+	 * @param int           $total       Bytes expected (for the progress callback).
+	 * @param callable|null $on_progress Called as ( int $bytes_sent, int $bytes_total ).
+	 * @return int Bytes written.
+	 */
+	public static function copy_stream( $from, $to, int $total, $on_progress = null ): int {
+		/**
+		 * Filter the SFTP upload chunk size in bytes (default 1 MB).
+		 *
+		 * @since 8.0.34
+		 *
+		 * @param int $chunk Chunk size in bytes.
+		 */
+		$chunk = max( 8192, (int) ( function_exists( 'apply_filters' ) ? apply_filters( 'ctxfeed_sftp_upload_chunk_bytes', 1048576 ) : 1048576 ) );
+		$sent  = 0;
+
+		// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fread, WordPress.WP.AlternativeFunctions.file_system_operations_fwrite, WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fwrite -- Streams the feed from the local file to the ssh2.sftp:// stream wrapper; WP_Filesystem has no streaming API for a remote SFTP resource.
+		while ( ! feof( $from ) ) {
+			$buffer = fread( $from, $chunk );
+			if ( false === $buffer ) {
+				break;
+			}
+			$length = strlen( $buffer );
+			$offset = 0;
+			while ( $offset < $length ) {
+				$written = fwrite( $to, 0 === $offset ? $buffer : substr( $buffer, $offset ) );
+				if ( false === $written || 0 === $written ) {
+					return $sent + $offset;
+				}
+				$offset += $written;
+			}
+			$sent += $length;
+			if ( is_callable( $on_progress ) ) {
+				call_user_func( $on_progress, $sent, $total );
+			}
+		}
+		// phpcs:enable WordPress.WP.AlternativeFunctions.file_system_operations_fread, WordPress.WP.AlternativeFunctions.file_system_operations_fwrite, WordPressVIPMinimum.Functions.RestrictedFunctions.file_ops_fwrite
+
+		return $sent;
+	}
+
+	/**
+	 * Remote file size via SFTP stat, or null when unavailable.
+	 *
+	 * @param string $remote Remote path.
+	 * @return int|null
+	 */
+	private function remote_size( string $remote ): ?int {
+		if ( ! function_exists( 'ssh2_sftp_stat' ) ) {
+			return null;
+		}
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, Generic.PHP.NoSilencedErrors.Forbidden -- A missing stat is a question, not an error; the null return is handled.
+		$stat = @ssh2_sftp_stat( $this->sftp, $remote );
+
+		return is_array( $stat ) && isset( $stat['size'] ) ? (int) $stat['size'] : null;
 	}
 
 	/**

@@ -193,9 +193,8 @@ class Logger {
 	 * @return string
 	 */
 	public static function system_log_path(): string {
-		$upload_dir = wp_get_upload_dir();
 
-		return trailingslashit( $upload_dir['basedir'] ) . 'woo-feed/logs/' . self::SYSTEM_LOG_FILE;
+		return \CTXFeed\V8\Utility\LogDirGuard::dir() . self::SYSTEM_LOG_FILE;
 	}
 
 	/**
@@ -280,8 +279,11 @@ class Logger {
 		$file = self::system_log_path();
 		$dir  = dirname( $file );
 
-		if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
-			return;
+		if ( ! is_dir( $dir ) ) {
+			if ( ! wp_mkdir_p( $dir ) ) {
+				return;
+			}
+			\CTXFeed\V8\Utility\LogDirGuard::ensure( $dir ); // CBT-708: a folder created here had no guard.
 		}
 
 		$flags = FILE_APPEND | LOCK_EX;

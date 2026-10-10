@@ -14,6 +14,8 @@
 
 namespace CTXFeed\V8\API;
 
+use CTXFeed\V8\Utility\Redactor;
+
 // Exit if accessed directly.
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
@@ -461,7 +463,9 @@ class SupportEndpoint extends RestController {
 		$status = new StatusEndpoint();
 		$files  = array(
 			'system-status.txt' => $status->full_status_text(),
-			'system-status.log' => '' === $feed ? $status->logs_text() : $this->feed_log( $feed ),
+			// Logs can hold credentials written by older versions (SFTP
+			// login failures) — never ship them unredacted (CBT-708).
+			'system-status.log' => Redactor::text( '' === $feed ? $status->logs_text() : $this->feed_log( $feed ), Redactor::saved_ftp_passwords() ),
 		);
 
 		$config_text = $this->feed_config_text( $feed );
@@ -539,7 +543,8 @@ class SupportEndpoint extends RestController {
 
 	/**
 	 * Recursively blank credential-carrying keys before a config leaves the
-	 * site (FTP/SFTP passwords live inside feedrules).
+	 * site (FTP/SFTP passwords live inside feedrules). Shared with the usage
+	 * data / deactivation feedback via Utility\Redactor (CBT-690).
 	 *
 	 * @since 8.0.14
 	 *
@@ -547,17 +552,7 @@ class SupportEndpoint extends RestController {
 	 * @return array
 	 */
 	private function redact_credentials( array $data ): array {
-		foreach ( $data as $key => $value ) {
-			if ( is_array( $value ) ) {
-				$data[ $key ] = $this->redact_credentials( $value );
-				continue;
-			}
-			if ( is_string( $key ) && preg_match( '/password|secret|api_key|apikey/i', $key ) && '' !== (string) $value ) {
-				$data[ $key ] = '(redacted)';
-			}
-		}
-
-		return $data;
+		return Redactor::credentials( $data );
 	}
 
 	/**
@@ -584,7 +579,7 @@ class SupportEndpoint extends RestController {
 			return '(logs directory unavailable)';
 		}
 
-		$log_dir = trailingslashit( $upload['basedir'] ) . 'woo-feed/logs/';
+		$log_dir = \CTXFeed\V8\Utility\LogDirGuard::dir();
 		if ( ! is_dir( $log_dir ) ) {
 			return '(no logs yet — enable debug logging in Settings, then regenerate the feed)';
 		}
@@ -646,7 +641,13 @@ class SupportEndpoint extends RestController {
 			);
 		}
 
-		return $option_name ? str_replace( 'wf_feed_', '', (string) $option_name ) : '';
+		// Only a wf_feed_ row is a feed — a stale numeric id can point at
+		// another plugin's option (CBT-695).
+		if ( ! $option_name || 0 !== strpos( (string) $option_name, 'wf_feed_' ) ) {
+			return '';
+		}
+
+		return substr( (string) $option_name, strlen( 'wf_feed_' ) );
 	}
 
 	/**
@@ -675,7 +676,7 @@ class SupportEndpoint extends RestController {
 		if ( 'all' === $feed ) {
 			global $wpdb;
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- wf_feed_ configs are non-autoloaded options with no enumerable get_option API; admin-only, on demand.
-			$names = (array) $wpdb->get_col( "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE 'wf_feed_%'" );
+			$names = (array) $wpdb->get_col( $wpdb->prepare( "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s", $wpdb->esc_like( 'wf_feed_' ) . '%' ) );
 			foreach ( $names as $name ) {
 				$slugs[] = str_replace( 'wf_feed_', '', (string) $name );
 			}
